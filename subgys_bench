@@ -1,0 +1,2832 @@
+#!/bin/bash
+
+# -----------------------------------------------------------------
+# script used for submit gysela5D job
+# -----------------------------------------------------------------
+arg=$#
+
+if [ $# -lt 1 ]; then
+    echo " Syntaxe:  subgys DATA_filename [debug|timer]         "
+    echo " with optional debug                            "
+    echo "      to run with executable in debug mode      "
+    echo " with optional timer                            "
+    echo "      to run with executable in timer mode      "
+    exit
+fi
+
+# case name
+# ---------
+CASENAME=`basename $1 | tr '[:lower:]' '[:upper:]'`
+OPTIONALMODE=`echo $2 | tr '[:lower:]' '[:upper:]'`
+MACHNAME=`echo $ARCH | tr '[:lower:]' '[:upper:]'`
+
+FIRSTCAR=${MACHNAME:0:1}
+PART=""
+if [ "$ARCH" == "marconi_knl" ]; then
+    PART="_KNL"
+fi
+if [ "$ARCH" == "marconi_skl" ]; then
+    PART="_SKL"
+fi
+CASE=D${FIRSTCAR}${PART}_${CASENAME}
+if [ "${OPTIONALMODE}" = "DEBUG" ]; then
+    echo " ==> run with executable in DEBUG mode "
+    CASE=${CASE}_DBG
+fi
+if [ "${OPTIONALMODE}" = "TIMER" ]; then
+    echo " ==> run with executable in TIMER mode "
+    CASE=${CASE}_TI
+fi
+if [ "${OPTIONALMODE}" = "SCOREP" ]; then
+    echo " ==> run with executable in SCORE-P mode "
+    CASE=${CASE}_SCP
+fi
+
+# data name
+# ---------
+DATANAME=$1
+
+# job parameters
+# --------------
+# number of RUNS
+NB_RESTART=`grep NB_RESTART $DATANAME | head -n 1 | tr -s '=' ' ' |  awk '{print $2}'`
+# time in seconds format
+TIMEH=$(grep TIME $DATANAME | head -n 1 | sed -n 's/.*[^0-9]\([0-9]*[0-9]:[0-9][0-9]:[0-9][0-9]\).*/\1/p')
+TIME=$(echo $TIMEH |awk -F: '{print 3600*$1+60*$2+$3}')
+# job Name
+JOBNAME=`grep JOBNAME $DATANAME  | head -n 1 | tr -s '=' ' ' |  awk '{print $2}'`
+STATUSOK=0
+KILLCMD=""
+
+# MPI/OpenMP resources
+# --------------------
+NSPECIES=`grep NSPECIES $DATANAME | head -n 1 | tr -s '=' ' ' |  awk '{print $2}'`
+NPROC_R=`grep NPROC_R   $DATANAME | head -n 1 | tr -s '=' ' ' |  awk '{print $2}'`
+NPROC_TH=`grep NPROC_TH $DATANAME | head -n 1 | tr -s '=' ' ' |  awk '{print $2}'`
+NPROC_MU=`grep NPROC_MU $DATANAME | head -n 1 | tr -s '=' ' ' |  awk '{print $2}'`
+NTHREAD=`grep NTHREAD   $DATANAME | head -n 1 | tr -s '=' ' ' | tr -s ',' ' ' | awk '{print $2}'`
+echo " NTHREAD " $NTHREAD
+
+((NPES=NPROC_R*NPROC_TH*NPROC_MU*NSPECIES))
+((MPIPROCS=8/$NTHREAD))
+((NNODES=(NPES*NTHREAD)/8))
+if [ $NNODES -eq 0 ]; then
+    ((NNODES=1))
+fi
+
+# Validate DATA file
+# ------------------
+if [ -f ./validate_data ]; then
+    if ! /usr/bin/env python3 ./validate_data $DATANAME $OPTIONALMODE
+    then
+        echo
+        echo "  You can bypass this test by removing the file wk/validate_data"
+        echo "  If your data file is correct but fails to pass this test"
+        echo "  please send it to the gysela mailing list"
+        exit 1
+    fi
+else
+    echo "  wk/validate_data not found, skipping validation"
+fi
+
+# Environment
+# -----------
+DIR=$(basename $(dirname $PWD))
+
+# Debug mode
+# ----------
+if [ "${OPTIONALMODE}" = "DEBUG" ]; then
+    exec_file=gysela_dbg.exe
+    go_file_cmd="go_"$DATANAME"_dbg.cmd"
+elif [ "${OPTIONALMODE}" = "TIMER" ]; then
+    exec_file=gysela_ti.exe
+    go_file_cmd="go_"$DATANAME"_ti.cmd"
+elif [ "${OPTIONALMODE}" = "SCOREP" ]; then
+    exec_file=gysela_scp.exe
+    go_file_cmd="go_"$DATANAME"_scp.cmd"
+else
+    exec_file=gysela.exe
+    go_file_cmd="go_"$DATANAME".cmd"
+fi
+if [ -f ${go_file_cmd} ]; then
+    rm -f ${go_file_cmd}
+fi
+
+# According to ARCH variable
+# --------------------------
+case ${ARCH} in
+
+# -----------------------------------------------------------------
+# pc CADTS-0294 (Virginie) 
+# -----------------------------------------------------------------
+pc_CADTS-0294*)
+
+# Directories
+if [ -d .svn ]; then
+    echo " Version du code sous SVN "
+    DIR=$(basename $(dirname $PWD))
+    HOMEDIR=${HOME}/${DIR}
+else
+    echo " Version du code sous GIT ! "
+    HOMEDIR=$(dirname $PWD)
+fi
+WKDIR=${HOMEDIR}/wk
+RESDIR1=${WKDIR}
+
+# Creation of the work directory
+RESDIR=${RESDIR1}/${CASE}
+if [ "${OPTIONALMODE}" = "DEBUG" ]; then
+    echo " ==> run with executable in DEBUG mode "
+fi
+if [ "${OPTIONALMODE}" = "TIMER" ]; then
+    echo " ==> run with executable in TIMER mode "
+fi
+if [ ! -d ${RESDIR} ]
+then
+    mkdir -p ${RESDIR}
+fi
+
+# Batch control
+CMD_MPIRUN="mpirun -np ${NPES} ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+CMD_SUB="./${go_file_cmd}"
+CMD_SUBRST=${CMD_SUB}
+
+TSLEEP=$(awk "BEGIN{printf(\"%.0f\",$TIME*.9);}")
+
+;;
+
+# -----------------------------------------------------------------
+# ccamu (Marseille)
+# -----------------------------------------------------------------
+ccamu*)
+
+# Directories
+HOMEDIR=${HOME}/${DIR}
+WKDIR=${HOMEDIR}/wk
+RESDIR1=/scratch/${USER}/${DIR}
+
+# Creation of the work directory
+if [ ! -d ${RESDIR1} ]; then
+    mkdir -p ${RESDIR1}
+fi
+RESDIR=${RESDIR1}/${CASE}
+if [ ! -d ${RESDIR} ]; then
+    mkdir -p ${RESDIR}
+    ln -s ${RESDIR} ${CASE}
+fi
+
+# Batch control
+echo " Nb processus required " $NPES
+CMD_MPIRUN="mpiexec -launcher ssh -launcher-exec oarsh -f mach -iface ib0 -n ${NPES} ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+CMD_SUB="oarsub -S ./${go_file_cmd}"
+CMD_SUBRST='wrapper_oar "'${CMD_SUB}'"'
+
+TSLEEP=$(awk "BEGIN{printf(\"%.0f\",$TIME*.9);}")
+
+cat <<EOF > ${go_file_cmd}
+#!/bin/bash
+#OAR -n $JOBNAME
+#OAR -l nodes=${NNODES},walltime=${TIMEH}
+#OAR -p cluster
+#OAR -O $JOBNAME.%jobid%.log
+#OAR -E $JOBNAME.%jobid%.log 
+
+wrapper_oar() { echo \$1 ; ssh $USER@login "cd ${WKDIR}; \$1" ; }
+
+cd ${RESDIR}
+echo " == hostfile ==="
+cat \$OAR_NODEFILE | sort -u > mach
+echo ''
+
+export OMP_NUM_THREADS=${NTHREAD}
+
+EOF
+
+;;
+
+# -----------------------------------------------------------------
+# Fugaku (ARM)
+# -----------------------------------------------------------------
+fugaku)
+
+# Directories
+HOMEDIR="$(readlink -f "$(dirname "$0")/..")"
+WKDIR=${HOMEDIR}/wk
+RESDIR1=${WKDIR}
+
+# Creation of the work directory
+if [ ! -d ${RESDIR1} ]; then
+    mkdir -p ${RESDIR1}
+fi
+RESDIR=${RESDIR1}/${CASE}
+if [ ! -d ${RESDIR} ]; then
+    mkdir -p ${RESDIR}
+fi
+
+((THPNODE=48))
+((MPIPROCS=$THPNODE/$NTHREAD))
+((NCPUS=$NPES*$NTHREAD))
+((NNODES=($NPES/$MPIPROCS)))
+((NCORES=($NTHREAD)))
+if [ $NNODES -eq 0 ]; then
+    ((NNODES=1))
+fi
+
+if [ $NTHREAD -ne 12 ]; then
+    echo "NTHREAD must be equal to 12 in your input file to have one MPI process per NUMA node"
+    exit
+fi
+
+CMD_MPIRUN="mpiexec -std ${DATANAME}.%jobid%.log -n $NPES -x OMP_NUM_THREADS=${NTHREAD} ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+#Launch instant profiler
+#CMD_MPIRUN="fipp -C -d ${RESDIR}/profiling mpiexec -n $NPES -x OMP_NUM_THREADS=${NTHREAD} ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+
+CMD_SUB="pjsub -S ${go_file_cmd}"
+CMD_SUBRST=${CMD_SUB}
+
+TSLEEP=$(awk "BEGIN{printf(\"%.0f\",$TIME*.9);}")
+
+cat <<EOF > ${go_file_cmd}
+#!/bin/bash
+#PJM -L "node=${NNODES}"
+##PJM -L "rg=large"
+#PJM --rsc-list "elapse=${TIME}"
+#PJM --mpi "proc=${NPES}"
+#PJM -S
+
+source ~/.bash_gysela
+export KMP_AFFINITY="verbose"
+EOF
+
+;;
+
+# -----------------------------------------------------------------
+# occigen Haswell (CINES)
+# -----------------------------------------------------------------
+occigen)
+
+# Directories
+HOMEDIR=${HOME}/${DIR}
+WKDIR=${HOMEDIR}/wk
+RESDIR1=${SCRATCHDIR}/${DIR}
+
+# Creation of the work directory
+if [ ! -d ${RESDIR1} ]; then
+    mkdir -p ${RESDIR1}
+fi
+RESDIR=${RESDIR1}/${CASE}
+if [ ! -d ${RESDIR} ]; then
+    mkdir -p ${RESDIR}
+    ln -s ${RESDIR} ${CASE}
+fi
+
+# We launch 48 threads per node even with 24 cores.
+((THPNODE=48))
+((MPIPROCS=$THPNODE/$NTHREAD))
+((CPUTASK=$THPNODE/(2*$MPIPROCS)))
+if [ $CPUTASK -eq 0 ]; then
+    ((CPUTASK=1))
+fi
+((NCPUS=$NPES*$NTHREAD))
+((NNODES=($THPNODE-1+$NPES*$NTHREAD)/$THPNODE))
+if [ $NNODES -eq 0 ]; then
+    ((NNODES=1))
+fi
+
+# With intelmpi
+#CMD_MPIRUN="mpirun -np ${NPES} ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+# With bullxmpi: --cpu_bind = none better than rank_ldom
+# Option "-m block:block" is important to distribute well threads (on more than 2 processes on one node)
+CMD_MPIRUN="srun -n $NPES --mpi=pmi2 -K1 -m block:block --resv-ports ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+CMD_SUB="sbatch ${go_file_cmd}"
+CMD_SUBRST=${CMD_SUB}
+
+TSLEEP=$(awk "BEGIN{printf(\"%.0f\",$TIME*.9);}")
+
+cat <<EOF > ${go_file_cmd}
+#!/bin/bash
+#SBATCH -J $JOBNAME             # jobname
+#SBATCH --constraint=HSW24      # processor Haswell
+#SBATCH --nodes=${NNODES}
+#SBATCH --ntasks-per-node=${MPIPROCS}
+#SBATCH --threads-per-core=1
+#SBATCH --cpus-per-task=${CPUTASK}
+#SBATCH -t ${TIMEH}            # execute time (hh:mm:ss - max 08:00:00)
+#SBATCH --mem=60GB
+#SBATCH --exclusive
+#SBATCH -o $JOBNAME%j.out      # strout filename (%j is jobid)
+#SBATCH -e $JOBNAME%j.out      # stderr filename (%j is jobid)
+
+#export KMP_AFFINITY="granularity=fine,compact,1,0,verbose" #OK with one process per node
+#export KMP_AFFINITY="compact,verbose" # Does not work very well
+export KMP_AFFINITY="verbose" # Works very well with two processes per node (1 process per socket)
+export OMP_NUM_THREADS=${NTHREAD}
+
+EOF
+
+;;      
+
+# -----------------------------------------------------------------
+# fuji (Fujitsu prototype)
+# -----------------------------------------------------------------
+fuji)
+
+# Directories
+#HOMEDIR=${HOME}/${DIR}
+HOMEDIR=${GYSELA_HOME}
+WKDIR=${GYSELA_HOME}/wk
+echo ${WKDIR}
+RESDIR1=${WKDIR}/${DIR}
+
+# Creation of the work directory
+if [ ! -d ${RESDIR1} ]; then
+    mkdir -p ${RESDIR1}
+fi
+RESDIR=${RESDIR1}/${CASE}
+#if [ ! -d ${RESDIR} ]; then
+#    mkdir -p ${RESDIR}
+#    ln -s ${RESDIR} ${CASE}
+#fi
+
+# We launch 48 threads per node even with 28 cores.
+((THPNODE=48))
+((MPIPROCS=$THPNODE/$NTHREAD))
+((CPUTASK=$THPNODE/($MPIPROCS)))
+((NCPUS=$NPES*$NTHREAD))
+((NNODES=($THPNODE-1+$NPES*$NTHREAD)/$THPNODE))
+if [ $NNODES -eq 0 ]; then
+    ((NNODES=1))
+fi
+((TOTMPIPROCS=${MPIPROCS}*${NNODES}))
+if [ $NTHREAD -ne 12 -a $NTHREAD -ne 24 ]; then
+    echo "Please set NTHREAD to 12 or 24 in your input file"
+    exit
+fi
+#
+#CMD_MPIRUN="srun -K1 -m block:block --resv-ports -n $NPES ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+#CMD_MPIRUN="mpirun -n $NPES -bind-to core --mca mpi_preconnect_all 1  --map-by ppr:$MPIPROCS:node:PE=${CPUTASK} --report-bindings ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+CMD_MPIRUN="mpiexec ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+CMD_SUB="pjsub ${go_file_cmd}"
+CMD_SUBRST=${CMD_SUB}
+
+TSLEEP=$(awk "BEGIN{printf(\"%.0f\",$TIME*.9);}")
+
+cat <<EOF > ${go_file_cmd}
+#!/bin/bash
+#PJM -L "rscunit= rscunit_ft01"
+#PJM -L "rscgrp=q48node" # Queue name
+#PJM -L "elapse=$TIME" # Elapse time in seconds (there are other time formats available)
+#PJM -L "node=${NNODES}" # Number of nodes (up to
+#PJM --mpi "proc=${TOTMPIPROCS}" # Number of MPI tasks (up to
+
+#source .bash_profile
+export PATH=/opt/FJSVxtclanga/tcsds-1.2.25/bin:$PATH
+export LD_LIBRARY_PATH=/opt/FJSVxtclanga/tcsds-1.2.25/lib64:$LD_LIBRARY_PATH
+source .bash_gysela
+cd ${GYSELA_HOME}/wk
+
+#export KMP_AFFINITY="verbose,scatter"
+export KMP_AFFINITY="verbose"
+export OMP_NUM_THREADS=${NTHREAD}
+export I_MPI_DEBUG=6
+ulimit -d unlimited
+ulimit -Sa
+ulimit -Ha
+ulimit -l unlimited
+
+unset FORT_BUFFERED
+
+set +v
+
+EOF
+
+;;
+
+# -----------------------------------------------------------------
+# fx700 (fx700 riken)
+# -----------------------------------------------------------------
+fx700)
+
+# Directories
+#HOMEDIR=${HOME}/${DIR}
+HOMEDIR=${GYSELA_PATH}
+WKDIR=${GYSELA_PATH}/wk
+echo ${WKDIR}
+RESDIR1=${WKDIR}
+
+# Creation of the work directory
+if [ ! -d ${RESDIR1} ]; then
+    mkdir -p ${RESDIR1}
+fi
+RESDIR=${RESDIR1}/${CASE}
+#if [ ! -d ${RESDIR} ]; then
+#    mkdir -p ${RESDIR}
+#    ln -s ${RESDIR} ${CASE}
+#fi
+
+# We launch 48 threads per node even with 28 cores.
+((THPNODE=48))
+((MPIPROCS=$THPNODE/$NTHREAD))
+((CPUTASK=$THPNODE/($MPIPROCS)))
+((NCPUS=$NPES*$NTHREAD))
+((NNODES=($THPNODE-1+$NPES*$NTHREAD)/$THPNODE))
+if [ $NNODES -eq 0 ]; then
+    ((NNODES=1))
+fi
+((TOTMPIPROCS=${MPIPROCS}*${NNODES}))
+if [ $NTHREAD -ne 12 -a $NTHREAD -ne 24 ]; then
+    echo "Please set NTHREAD to 12 or 24 in your input file"
+    exit
+fi
+#
+#CMD_MPIRUN="srun -K1 -m block:block --resv-ports -n $NPES ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+#CMD_MPIRUN="mpirun -n $NPES -bind-to core --mca mpi_preconnect_all 1  --map-by ppr:$MPIPROCS:node:PE=${CPUTASK} --report-bindings ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+CMD_MPIRUN="mpiexec -n ${NPES} ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+CMD_SUB="sbatch ${go_file_cmd}"
+CMD_SUBRST=${CMD_SUB}
+
+TSLEEP=$(awk "BEGIN{printf(\"%.0f\",$TIME*.9);}")
+
+cat <<EOF > ${go_file_cmd}
+#!/bin/bash
+#SBATCH -J $JOBNAME             # jobname
+#SBATCH -p fx700   #partition
+#SBATCH --nodes=${NNODES}
+#SBATCH --ntasks-per-node=${MPIPROCS}
+#SBATCH --threads-per-core=1
+#SBATCH --cpus-per-task=${CPUTASK}
+#SBATCH -t ${TIMEH}            # execute time (hh:mm:ss - max 08:00:00)
+#SBATCH --exclusive
+#SBATCH -o $JOBNAME%j.out      # strout filename (%j is jobid)
+#SBATCH -e $JOBNAME%j.out      # stderr filename (%j is jobid)
+
+#export KMP_AFFINITY="verbose,scatter"
+export KMP_AFFINITY="verbose"
+export OMP_NUM_THREADS=${NTHREAD}
+
+#source .bash_profile
+source ~/.bash_gysela
+cd ${GYSELA_PATH}/wk
+
+#export KMP_AFFINITY="verbose,scatter"
+export KMP_AFFINITY="verbose"
+export OMP_NUM_THREADS=${NTHREAD}
+#export I_MPI_DEBUG=6
+ulimit -d unlimited
+ulimit -Sa
+ulimit -Ha
+ulimit -l unlimited
+
+unset FORT_BUFFERED
+
+set +v
+
+EOF
+
+;;
+
+
+# -----------------------------------------------------------------
+# occigen2 Broadwell (CINES)
+# -----------------------------------------------------------------
+occigen2)
+
+# Directories
+HOMEDIR=${HOME}/${DIR}
+WKDIR=${HOMEDIR}/wk
+RESDIR1=${SCRATCHDIR}/${DIR}
+
+# Creation of the work directory
+if [ ! -d ${RESDIR1} ]; then
+    mkdir -p ${RESDIR1}
+fi
+RESDIR=${RESDIR1}/${CASE}
+if [ ! -d ${RESDIR} ]; then
+    mkdir -p ${RESDIR}
+    ln -s ${RESDIR} ${CASE}
+fi
+
+# We launch 56 threads per node even with 28 cores.
+((THPNODE=56))
+((MPIPROCS=$THPNODE/$NTHREAD))
+((CPUTASK=$THPNODE/(2*$MPIPROCS)))
+((NCPUS=$NPES*$NTHREAD))
+((NNODES=($THPNODE-1+$NPES*$NTHREAD)/$THPNODE))
+if [ $NNODES -eq 0 ]; then
+    ((NNODES=1))
+fi
+
+if [ $NTHREAD -ne 14 -a $NTHREAD -ne 28 ]; then
+    echo "Please set NTHREAD to 14 or 28 in your input file"
+    exit
+fi
+#
+#CMD_MPIRUN="srun -K1 -m block:block --resv-ports -n $NPES ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+CMD_MPIRUN="mpirun -n $NPES -bind-to core --mca mpi_preconnect_all 1  --map-by ppr:$MPIPROCS:node:PE=${CPUTASK} --report-bindings ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+CMD_SUB="sbatch ${go_file_cmd}"
+CMD_SUBRST=${CMD_SUB}
+
+TSLEEP=$(awk "BEGIN{printf(\"%.0f\",$TIME*.9);}")
+
+cat <<EOF > ${go_file_cmd}
+#!/bin/bash
+#SBATCH -J $JOBNAME             # jobname
+#SBATCH --constraint=BDW28      # processor Broadwell     
+#SBATCH --nodes=${NNODES}
+#BATCH --ntasks-per-node=${MPIPROCS}
+#BATCH --threads-per-core=1
+#BATCH --cpus-per-task=${CPUTASK}
+#SBATCH -t ${TIMEH}            # execute time (hh:mm:ss - max 08:00:00)
+#SBATCH --mem=50GB
+#SBATCH --exclusive
+#SBATCH -o $JOBNAME%j.out      # strout filename (%j is jobid)
+#SBATCH -e $JOBNAME%j.out      # stderr filename (%j is jobid)
+
+#export KMP_AFFINITY="verbose,scatter"
+export KMP_AFFINITY="verbose"
+export OMP_NUM_THREADS=${NTHREAD}
+ulimit -d unlimited
+ulimit -Sa
+ulimit -Ha
+ulimit -l unlimited
+
+unset FORT_BUFFERED
+
+set +v
+
+EOF
+
+;;
+
+# -----------------------------------------------------------------
+# irene SKL (TGCC)
+# -----------------------------------------------------------------
+irene_skl*)
+
+# Directories
+# -----------
+HOMEDIR="$(readlink -f "$(dirname "$0")/..")"
+WKDIR=${HOMEDIR}/wk
+RESDIR1=${CCCSCRATCHDIR}/${DIR}
+
+# Creation of the work directory
+if [ ! -d ${RESDIR1} ]; then
+    mkdir -p ${RESDIR1}
+fi    
+RESDIR=${RESDIR1}/${CASE}
+if [ ! -d ${RESDIR} ]; then
+    mkdir -p ${RESDIR}
+    ln -s ${RESDIR} ${CASE}
+fi
+
+# SKL partition
+PART="skylake"
+((THPNODE=48))
+((MPIPROCS=$THPNODE/$NTHREAD))
+((NCPUS=$NPES*$NTHREAD))
+((CPUTASK=$THPNODE/($MPIPROCS)))
+if [ $CPUTASK -eq 0 ]; then
+    ((CPUTASK=1))
+fi
+((NNODES=($THPNODE-1+$NPES*$NTHREAD)/$THPNODE))
+if [ $NNODES -eq 0 ]; then
+    ((NNODES=1))
+fi
+
+if [ $NTHREAD -ne 12 -a $NTHREAD -ne 24 ]; then
+    echo "Please set NTHREAD to 24 (highly recommanded) or 12 in your input file"
+    exit
+fi
+
+if [ -z "${PROJ}" ]; then
+    echo "Please set the environment variable PROJ to define the project you are in."
+    exit
+fi
+
+# Batch control
+PROJ_GENCI="-A gen2224"
+CMD_MPIRUN="ccc_mprun ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+CMD_SUB="ccc_msub -m work,scratch $PROJ_GENCI ${go_file_cmd}"
+#CMD_SUBRST="sleep 10 ; wrapper_msub '${CMD_SUB}'"
+CMD_SUBRST=${CMD_SUB}
+
+TSLEEP=$(awk "BEGIN{printf(\"%.0f\",$TIME*.9);}")
+
+cat <<EOF > ${go_file_cmd}
+#!/bin/bash
+#MSUB -r $JOBNAME           # Nom du job                
+#MSUB -n $NPES              # Nb processus
+#MSUB -N $NNODES            # Nb nodes
+#MSUB -c $NTHREAD           # Nb thread
+#MSUB -T $TIME              # Limite de temps elapsed
+#MSUB -m work,scratch
+#MSUB -q $PART
+#MSUB -x
+#MSUB -E '--licenses=fs_unshare,fs_work,fs_scratch'
+#MSUB -o ${JOBNAME}_%I.out
+#MSUB -e ${JOBNAME}_%I.out
+
+ulimit -d unlimited
+ulimit -Sa
+ulimit -Ha
+
+# The BRIDGE_MSUB_PWD environment variable contains the directory from which the script was submitted
+echo " BRIDGE_MSUB_PWD "
+cd \${BRIDGE_MSUB_PWD}
+pwd
+
+EOF
+
+;;
+
+# -----------------------------------------------------------------
+# irene arm (TGCC)
+# -----------------------------------------------------------------
+irene_arm*)
+
+# Directories
+# -----------
+HOMEDIR="$(readlink -f "$(dirname "$0")/..")"
+WKDIR=${HOMEDIR}/wk
+RESDIR1=${CCCSCRATCHDIR}/${DIR}
+
+# Creation of the work directory
+if [ ! -d ${RESDIR1} ]; then
+    mkdir -p ${RESDIR1}
+fi    
+RESDIR=${RESDIR1}/${CASE}
+if [ ! -d ${RESDIR} ]; then
+    mkdir -p ${RESDIR}
+    ln -s ${RESDIR} ${CASE}
+fi
+
+# SKL partition
+PART="a64fx"
+((THPNODE=48))
+((MPIPROCS=$THPNODE/$NTHREAD))
+((NCPUS=$NPES*$NTHREAD))
+((CPUTASK=$THPNODE/($MPIPROCS)))
+if [ $CPUTASK -eq 0 ]; then
+    ((CPUTASK=1))
+fi
+((NNODES=($THPNODE-1+$NPES*$NTHREAD)/$THPNODE))
+if [ $NNODES -eq 0 ]; then
+    ((NNODES=1))
+fi
+
+if [ $NTHREAD -ne 12 -a $NTHREAD -ne 24 ]; then
+    echo "Please set NTHREAD to 24 (highly recommanded) or 12 in your input file"
+    exit
+fi
+
+if [ -z "${PROJ}" ]; then
+    echo "Please set the environment variable PROJ to define the project you are in."
+    exit
+fi
+
+# Batch control
+PROJ_GENCI="-A ${PROJ}"
+CMD_MPIRUN="ccc_mprun ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+CMD_SUB="ccc_msub -m work,scratch $PROJ_GENCI ${go_file_cmd}"
+#CMD_SUBRST="sleep 10 ; wrapper_msub '${CMD_SUB}'"
+CMD_SUBRST=${CMD_SUB}
+
+TSLEEP=$(awk "BEGIN{printf(\"%.0f\",$TIME*.9);}")
+
+cat <<EOF > ${go_file_cmd}
+#!/bin/bash
+#MSUB -r $JOBNAME           # Nom du job                
+#MSUB -n $NPES              # Nb processus
+#MSUB -N $NNODES            # Nb nodes
+#MSUB -c $NTHREAD           # Nb thread
+#MSUB -T $TIME              # Limite de temps elapsed
+#MSUB -m work,scratch
+#MSUB -q $PART
+#MSUB -x
+#MSUB -E '--licenses=fs_unshare,fs_work,fs_scratch'
+#MSUB -o ${JOBNAME}_%I.out
+#MSUB -e ${JOBNAME}_%I.out
+
+ulimit -d unlimited
+ulimit -Sa
+ulimit -Ha
+
+# The BRIDGE_MSUB_PWD environment variable contains the directory from which the script was submitted
+echo " BRIDGE_MSUB_PWD "
+cd \${BRIDGE_MSUB_PWD}
+pwd
+
+EOF
+
+;;
+# -----------------------------------------------------------------
+# irene KNL (TGCC)
+# -----------------------------------------------------------------
+irene_knl*)
+
+# Directories
+# -----------
+HOMEDIR="$(readlink -f "$(dirname "$0")/..")"
+WKDIR=${HOMEDIR}/wk
+RESDIR1=${CCCSCRATCHDIR}/${DIR}
+
+# Creation of the work directory
+if [ ! -d ${RESDIR1} ]; then
+    mkdir -p ${RESDIR1}
+fi
+RESDIR=${RESDIR1}/${CASE}
+if [ ! -d ${RESDIR} ]; then
+    mkdir -p ${RESDIR}
+    ln -s ${RESDIR} ${CASE}
+fi
+
+# KNL partition
+PART="knl"
+((THPNODE=128))
+if [ $NTHREAD -ne 16 -a $NTHREAD -ne 32 ]; then
+    echo "Please set NTHREAD to 32 (highly recommanded) or 16 in your input file"
+    exit
+fi
+if [ $NTHREAD -eq 30 ]; then
+    NTHREAD=32
+    RESTORETHREADS=30
+fi
+
+((MPIPROCS=$THPNODE/$NTHREAD))
+((NCPUS=$NPES*$NTHREAD))
+((CPUTASK=$THPNODE/(2*$MPIPROCS)))
+((NCORES=$NTHREAD/2))
+if [ $CPUTASK -eq 0 ]; then
+    ((CPUTASK=1))
+fi
+((NNODES=($THPNODE-1+$NPES*$NTHREAD)/$THPNODE))
+if [ $NNODES -eq 0 ]; then
+    ((NNODES=1))
+fi
+
+if [ -n "$RESTORETHREAD" ]; then
+    NTHREAD=$RESTORETHREAD
+fi
+
+if [ -z "${PROJ}" ]; then
+    echo "Please set the environment variable PROJ to define the project you are in."
+    exit
+fi
+
+# Batch control
+PROJ_GCH="-A genr1900"
+#CMD_MPIRUN="mpirun --map-by ppr:$MPIPROCS:node:PE=${CPUTASK} -np ${NPES} ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+#CMD_MPIRUN="ccc_mprun -m scratch  ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+CMD_MPIRUN="ccc_mprun -m scratch -E '--cpu_bind=cores,v -m block:block' ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+#CMD_SUB="ccc_msub -m work,scratch,store $PROJ_GCH ${go_file_cmd}"
+CMD_SUB="ccc_msub -m work,scratch $PROJ_GCH ${go_file_cmd}"
+CMD_SUBRST=${CMD_SUB}
+
+TSLEEP=$(awk "BEGIN{printf(\"%.0f\",$TIME*.9);}")
+
+cat <<EOF > ${go_file_cmd}
+#!/bin/bash
+#MSUB -r $JOBNAME
+#MSUB -n $NPES              # Nb processus
+#MSUB -c $NCORES           # Nb thread
+#MSUB -T $TIME              # Limite de temps elapsed
+#MSUB -q $PART
+#3000,3253,3276,3277,3278,3402,3524,3530,3537,3539,3775
+##MSUB -E '--exclude=irene[3113,3325,3290]'
+#MSUB -x
+#MSUB -E '--licenses=fs_unshare,fs_work,fs_scratch'
+#MSUB -o ${JOBNAME}_%I.out
+#MSUB -e ${JOBNAME}_%I.out
+#MSUB -V
+#MSUB -N $NNODES            # Nb nodes
+
+ulimit -d unlimited
+ulimit -Sa
+ulimit -Ha
+ulimit -l unlimited
+
+module unload flavor/openmpi/knl
+#module load flavor/openmpi/knl
+module sw feature/openmpi/net/bxi
+#module sw feature/openmpi/net/bxi-btl_pipelined
+module sw mpi/openmpi/2.0.4
+module list
+
+export OMPI_MCA_btl_portals4_hide_errors_on_finalize=1
+#export OMPI_MCA_btl_portals4_eq_recv_size=128000
+export KMP_AFFINITY=scatter,verbose
+export SLURM_CPU_BIND=verbose
+
+# The BRIDGE_MSUB_PWD environment variable contains the directory from which the script was submitted
+#echo \${BRIDGE_MSUB_PWD}
+
+EOF
+
+;;
+
+
+# -----------------------------------------------------------------
+# irene AMD Rome (TGCC)
+# -----------------------------------------------------------------
+irene_amd*)
+
+# Directories
+# -----------
+HOMEDIR="$(readlink -f "$(dirname "$0")/..")"
+WKDIR=${HOMEDIR}/wk
+RESDIR1=${CCCSCRATCHDIR}/${DIR}
+
+# Creation of the work directory
+if [ ! -d ${RESDIR1} ]; then
+    mkdir -p ${RESDIR1}
+fi
+RESDIR=${RESDIR1}/${CASE}
+if [ ! -d ${RESDIR} ]; then
+    mkdir -p ${RESDIR}
+    ln -s ${RESDIR} ${CASE}
+fi
+
+# AMD partition
+PART="rome"
+((THPNODE=128))
+
+((MPIPROCS=$THPNODE/$NTHREAD))
+((NCPUS=$NPES*$NTHREAD))
+((CPUTASK=$NTHREAD))
+((NCORES=$NTHREAD))
+if [ $CPUTASK -eq 0 ]; then
+    ((CPUTASK=1))
+fi
+((NNODES=$NCPUS/$THPNODE))
+if [ $NNODES -eq 0 ]; then
+    ((NNODES=1))
+fi
+((RESIDU=$NCPUS%$THPNODE))
+if [ $RESIDU -gt 0 ]; then
+    echo "One node would be underused. Please set NCPUS as a multiple of $THPNODE"
+    exit
+fi
+
+#if [ -n "$RESTORETHREAD" ]; then
+#    NTHREAD=$RESTORETHREAD
+#fi
+
+if [ -z "${PROJ}" ]; then
+    echo "Please set the environment variable PROJ to define the project you are in."
+    exit
+fi
+
+# Batch control
+#PROJ_PRACE19="-A tgcc0088"
+PROJ="-A ${PROJ}"
+CMD_MPIRUN="ccc_mprun -E '-m block:block' -m work,scratch ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+CMD_SUB="ccc_msub -m work,scratch $PROJ ${go_file_cmd}"
+CMD_SUBRST=${CMD_SUB}
+
+TSLEEP=$(awk "BEGIN{printf(\"%.0f\",$TIME*.9);}")
+
+cat <<EOF > ${go_file_cmd}
+#!/bin/bash
+#MSUB -r $JOBNAME
+#MSUB -n $NPES           # Nb processus
+#MSUB -c $NCORES         # Nb thread
+#MSUB -T $TIME           # Limite de temps elapsed
+#MSUB -q $PART
+#MSUB -m work,scratch
+#MSUB -x
+##MSUB -E '--licenses=fs_unshare,fs_work,fs_scratch'
+#MSUB -o ${JOBNAME}_%I.out
+#MSUB -e ${JOBNAME}_%I.out
+#MSUB -V
+#MSUB -N $NNODES            # Nb nodes
+
+ulimit -d unlimited
+ulimit -Sa
+ulimit -Ha
+ulimit -l unlimited
+
+module list
+
+#export OMPI_MCA_btl_portals4_hide_errors_on_finalize=1
+#export OMPI_MCA_btl_portals4_eq_recv_size=128000
+#granularity=core   #specifies whether to pin OpenMP threads to physical cores, this is the default
+#granularity=fine   #This is only effective on nodes that support hyperthreading
+export KMP_AFFINITY="verbose,granularity=fine,compact,1,0"   #OK with one process per node
+#export KMP_AFFINITY="compact,verbose"                        # Does not work very well
+#export KMP_AFFINITY="verbose"                                 # Works very well with two processes per node (1 process per socket)
+#export SLURM_CPU_BIND=verbose
+
+EOF
+
+;;
+
+# -----------------------------------------------------------------
+# ci (continuous integration / INRIA)
+# -----------------------------------------------------------------
+ci*)
+
+# Directories
+# -----------
+HOMEDIR=${PWD}/..
+WKDIR=${PWD}
+RESDIR1=${PWD}
+
+# Creation of the work directory
+# ------------------------------
+if [ ! -d ${RESDIR1} ]
+then
+    mkdir -p ${RESDIR1}
+fi
+RESDIR=${RESDIR1}/${CASE}
+if [ ! -d ${RESDIR} ]; then
+    mkdir -p ${RESDIR}
+#NOT USEFUL  ln -s ${RESDIR} ${CASE}
+fi
+
+# Batch control
+# -------------
+# --map-by ppr:8:socket:pe=1 --cpu-set 0-3 --oversubscribe
+#CMD_MPIRUN="mpirun --bind-to core --report-bindings -np ${NPES} ${RESDIR}/${exec_file} > >(tee ${RESDIR}/gysela_log.out) 2> >(tee ${RESDIR}/gysela_res.err >&2) & PID=\$!; echo \$PID > mpistop.pid; wait \$PID"
+CMD_MPIRUN="mpirun -np ${NPES} ${RESDIR}/${exec_file} > >(tee ${RESDIR}/gysela_log.out) 2> >(tee ${RESDIR}/gysela_res.err >&2) & PID=\$!; echo \$PID > mpistop.pid; wait \$PID"
+CMD_SUB="./${go_file_cmd}"
+CMD_SUBRST="sleep 15; ${CMD_SUB}"
+KILLCMD='kill -9 `cat mpistop.pid`'
+TSLEEP=$(awk "BEGIN{printf(\"%.0f\",(($TIME>10)?$TIME*0.9:10));}")
+
+;;
+
+# -----------------------------------------------------------------
+# Izar Scitas (EPFL Suisse)
+# -----------------------------------------------------------------
+izar_gnu)
+
+# Directories
+# -----------
+HOMEDIR="$(readlink -f "$(dirname "$0")/..")"
+WKDIR=${HOMEDIR}/wk
+RESDIR1=${SCRATCH}/peyberne/gysela/${DIR}
+# Creation of the work directory
+# ------------------------------
+if [ ! -d ${RESDIR1} ]
+then
+    mkdir -p ${RESDIR1}
+fi
+RESDIR=${RESDIR1}/${CASE}
+if [ ! -d ${RESDIR} ]; then
+    mkdir -p ${RESDIR}
+    ln -s ${RESDIR} ${CASE}
+fi
+
+# Batch control
+# -------------
+((THPNODE=40))
+((MPIPROCS=$THPNODE/$NTHREAD))
+((NCPUS=$NPES*$NTHREAD))
+((CPUTASK=$THPNODE/($MPIPROCS)))
+if [ $CPUTASK -eq 0 ]; then
+    ((CPUTASK=1))
+fi
+((NNODES=($THPNODE-1+$NPES*$NTHREAD)/$THPNODE))
+if [ $NNODES -eq 0 ]; then
+    ((NNODES=1))
+fi
+#
+#if [ $NTHREAD -ne 10 -a $NTHREAD -ne 20 ]; then
+#    echo "Please set NTHREAD to 20 (highly recommanded) or 10 in your input file"
+#    exit
+#fi
+
+CMD_MPIRUN="srun -n  ${NPES} ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+CMD_SUB="sbatch ${go_file_cmd}"
+CMD_SUBRST="sbatch ${go_file_cmd}"
+
+TSLEEP=$(awk "BEGIN{printf(\"%.0f\",$TIME*.9);}")
+
+cat <<EOF > ${go_file_cmd}
+#!/bin/bash
+#SBATCH -J $JOBNAME                # jobname
+#SBATCH --nodes=${NNODES}
+#SBATCH --ntasks-per-node=${MPIPROCS}
+#SBATCH --threads-per-core=1
+#SBATCH --qos gpu
+#SBATCH --gres=gpu:2
+#SBATCH -p debug
+#SBATCH --cpus-per-task=1 # ${CPUTASK}
+#SBATCH --time=01:00:00 # ${TIMEH}            # execute time (hh:mm:ss - max 08:00:00)
+##SBATCH --account=${PROJ}          # account number
+##SBATCH -o $JOBNAME%j.out          # strout filename (%j is jobid)
+##SBATCH -e $JOBNAME%j.out          # stderr filename (%j is jobid)
+#SBATCH --exclusive
+##SBATCH --partition=${QUEUE_NAME}
+EOF
+
+#if [ "${OPTIONALMODE}" = "SCOREP" ]; then
+#    cat <<EOF >> ${go_file_cmd}
+#
+#module load cubelib scorep
+#EOF
+#fi
+
+
+cat <<EOF >> ${go_file_cmd}
+
+wrapper_pbs() { echo \$1 ; cd ${WKDIR}; \$1; }
+
+export LANG=C
+export MKL_DOMAIN_NUM_THREADS="MKL_DOMAIN_ALL=1"
+export MKL_ENABLE_INSTRUCTIONS="AVX512"
+export MKL_NUM_THREADS="1"
+export MKL_DYNAMIC="FALSE"
+export I_MPI_DEBUG=5
+export I_MPI_FABRICS=shm:ofi
+export I_MPI_OFI_PROVIDER=psm2
+export KMP_AFFINITY=verbose
+export KMP_HW_SUBSET=1T
+
+EOF
+
+printf " #Watch your job with:\n  squeue -u \$USER @skl1\n" 
+printf " #Delete your job with:\n scancel Job_ID\n" 
+
+;;
+
+# -----------------------------------------------------------------
+# Piz-daint CSCS for CPU (ETH Suisse)
+# -----------------------------------------------------------------
+daint)
+
+# Directories
+# -----------
+HOMEDIR="$(readlink -f "$(dirname "$0")/..")"
+WKDIR=${HOMEDIR}/wk
+RESDIR1=${SCRATCH}/${DIR}
+# Creation of the work directory
+# ------------------------------
+if [ ! -d ${RESDIR1} ]
+then
+    mkdir -p ${RESDIR1}
+fi
+RESDIR=${RESDIR1}/${CASE}
+if [ ! -d ${RESDIR} ]; then
+    mkdir -p ${RESDIR}
+    ln -s ${RESDIR} ${CASE}
+fi
+
+# Batch control
+# -------------
+((THPNODE=12))
+((MPIPROCS=$THPNODE/$NTHREAD))
+((NCPUS=$NPES*$NTHREAD))
+((CPUTASK=$THPNODE/($MPIPROCS)))
+if [ $CPUTASK -eq 0 ]; then
+    ((CPUTASK=1))
+fi
+((NNODES=($THPNODE-1+$NPES*$NTHREAD)/$THPNODE))
+if [ $NNODES -eq 0 ]; then
+    ((NNODES=1))
+fi
+#
+#if [ $NTHREAD -ne 12 -a $NTHREAD -ne 24 ]; then
+#    echo "Please set NTHREAD to 12 (highly recommanded) or 24 in your input file"
+#    exit
+#fi
+
+CMD_MPIRUN="srun -n  ${NPES} ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+CMD_SUB="sbatch ${go_file_cmd}"
+CMD_SUBRST="sbatch ${go_file_cmd}"
+
+TSLEEP=$(awk "BEGIN{printf(\"%.0f\",$TIME*.9);}")
+
+cat <<EOF > ${go_file_cmd}
+#!/bin/bash
+#SBATCH -J $JOBNAME                # jobname
+#SBATCH --nodes=${NNODES}
+#SBATCH --ntasks-per-node=${NPES} # ${MPIPROCS}
+#SBATCH --cpus-per-task=1 # ${CPUTASK}
+#SBATCH --threads-per-core=1
+#SBATCH --partition=debug
+#SBATCH --account=g26
+#SBATCH -C mc
+#SABTCH --mem=MaxMemPerNode  
+#SBATCH --time=${TIMEH}            # execute time (hh:mm:ss - max 08:00:00)
+##SBATCH --account=${PROJ}          # account number
+#SBATCH -o $JOBNAME%j.out          # strout filename (%j is jobid)
+#SBATCH -e $JOBNAME%j.out          # stderr filename (%j is jobid)
+#SBATCH --exclusive
+##SBATCH --partition=${QUEUE_NAME}
+EOF
+
+#if [ "${OPTIONALMODE}" = "SCOREP" ]; then
+#    cat <<EOF >> ${go_file_cmd}
+#
+#module load cubelib scorep
+#EOF
+#fi
+
+
+cat <<EOF >> ${go_file_cmd}
+
+wrapper_pbs() { echo \$1 ; cd ${WKDIR}; \$1; }
+
+export LANG=C
+export MKL_DOMAIN_NUM_THREADS="MKL_DOMAIN_ALL=1"
+export MKL_ENABLE_INSTRUCTIONS="AVX512"
+export MKL_NUM_THREADS="1"
+export MKL_DYNAMIC="FALSE"
+export I_MPI_DEBUG=5
+export I_MPI_FABRICS=shm:ofi
+export I_MPI_OFI_PROVIDER=psm2
+export KMP_AFFINITY=verbose
+export KMP_HW_SUBSET=1T
+
+EOF
+
+printf " #Watch your job with:\n  squeue -u \$USER @skl1\n" 
+printf " #Delete your job with:\n scancel Job_ID\n" 
+
+;;
+
+# -----------------------------------------------------------------
+# Piz-daint CSCS for GPU (ETH Suisse)
+# -----------------------------------------------------------------
+daint_gpu)
+
+# Directories
+# -----------
+HOMEDIR="$(readlink -f "$(dirname "$0")/..")"
+WKDIR=${HOMEDIR}/wk
+RESDIR1=${SCRATCH}/${DIR}
+# Creation of the work directory
+# ------------------------------
+if [ ! -d ${RESDIR1} ]
+then
+    mkdir -p ${RESDIR1}
+fi
+RESDIR=${RESDIR1}/${CASE}
+if [ ! -d ${RESDIR} ]; then
+    mkdir -p ${RESDIR}
+    ln -s ${RESDIR} ${CASE}
+fi
+
+# Batch control
+# -------------
+((THPNODE=12))
+((MPIPROCS=$THPNODE/$NTHREAD))
+((NCPUS=$NPES*$NTHREAD))
+((CPUTASK=$THPNODE/($MPIPROCS)))
+if [ $CPUTASK -eq 0 ]; then
+    ((CPUTASK=1))
+fi
+((NNODES=($THPNODE-1+$NPES*$NTHREAD)/$THPNODE))
+if [ $NNODES -eq 0 ]; then
+    ((NNODES=1))
+fi
+#
+#if [ $NTHREAD -ne 12 -a $NTHREAD -ne 24 ]; then
+#    echo "Please set NTHREAD to 12 (highly recommanded) or 24 in your input file"
+#    exit
+#fi
+
+CMD_MPIRUN="srun -n  ${NPES} ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+CMD_SUB="sbatch ${go_file_cmd}"
+CMD_SUBRST="sbatch ${go_file_cmd}"
+
+TSLEEP=$(awk "BEGIN{printf(\"%.0f\",$TIME*.9);}")
+
+cat <<EOF > ${go_file_cmd}
+#!/bin/bash
+#SBATCH -J $JOBNAME                # jobname
+#SBATCH --nodes=${NNODES}
+#SBATCH --ntasks-per-node=${NPES} # ${MPIPROCS}
+#SBATCH --cpus-per-task=1 # ${CPUTASK}
+#SBATCH --threads-per-core=1
+#SBATCH --gres=gpu:1
+##SBATCH --partition=debug
+#SBATCH --account=g26
+#SBATCH -C gpu
+#SBATCH --constraint=gpu
+#SABTCH --mem=MaxMemPerNode  
+#SBATCH --time=${TIMEH}            # execute time (hh:mm:ss - max 08:00:00)
+##SBATCH --account=${PROJ}          # account number
+#SBATCH -o $JOBNAME%j.out          # strout filename (%j is jobid)
+#SBATCH -e $JOBNAME%j.out          # stderr filename (%j is jobid)
+#SBATCH --exclusive
+##SBATCH --partition=${QUEUE_NAME}
+EOF
+
+#if [ "${OPTIONALMODE}" = "SCOREP" ]; then
+#    cat <<EOF >> ${go_file_cmd}
+#
+#module load cubelib scorep
+#EOF
+#fi
+
+
+cat <<EOF >> ${go_file_cmd}
+
+wrapper_pbs() { echo \$1 ; cd ${WKDIR}; \$1; }
+
+export LANG=C
+export MKL_DOMAIN_NUM_THREADS="MKL_DOMAIN_ALL=1"
+export MKL_ENABLE_INSTRUCTIONS="AVX512"
+export MKL_NUM_THREADS="1"
+export MKL_DYNAMIC="FALSE"
+export I_MPI_DEBUG=5
+export I_MPI_FABRICS=shm:ofi
+export I_MPI_OFI_PROVIDER=psm2
+export KMP_AFFINITY=verbose
+export KMP_HW_SUBSET=1T
+
+EOF
+
+printf " #Watch your job with:\n  squeue -u \$USER @skl1\n" 
+printf " #Delete your job with:\n scancel Job_ID\n" 
+
+;;
+
+# -----------------------------------------------------------------
+# frioul_knl (CINES)
+# -----------------------------------------------------------------
+frioul_knl)
+
+# Directories
+HOMEDIR=${HOME}/${DIR}
+WKDIR=${HOMEDIR}/wk
+RESDIR1=${WKDIR}
+
+# Creation of the work directory
+if [ ! -d ${RESDIR1} ]; then
+    mkdir -p ${RESDIR1}
+fi
+RESDIR=${RESDIR1}/${CASE}
+if [ ! -d ${RESDIR} ]; then
+    mkdir -p ${RESDIR}
+    ln -s ${RESDIR} ${CASE}
+fi
+
+# We launch 56 threads per node even with 28 cores.  
+if [ $NTHREAD -eq 34 -o $NTHREAD -eq 68 ]; then
+    ((THPNODE=136))
+else
+    ((THPNODE=128))
+fi
+((MPIPROCS=$THPNODE/$NTHREAD))
+((NCPUS=$NPES*$NTHREAD))
+((CPUTASK=$THPNODE/($MPIPROCS)))
+((NNODES=($THPNODE-1+$NPES*$NTHREAD)/$THPNODE))
+if [ $NNODES -eq 0 ]; then
+    ((NNODES=1))
+fi
+
+if [ $NTHREAD -ne 16 -a $NTHREAD -ne 32 -a $NTHREAD -ne 64 -a $NTHREAD -ne 34 -a $NTHREAD -ne 68 ]; then
+    echo "Please set NTHREAD to 32 (highly recommanded) or 16 or 34 or 64 or 68 in your input file"
+    exit
+fi
+#
+#CMD_MPIRUN="srun -K1 -m block:block  --resv-ports -n $NPES ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+#mpirun -n $NPES -bind-to core --mca mpi_preconnect_all 1  --map-by ppr:$MPIPROCS:node:PE=${CPUTASK} --report-bindings ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err
+CMD_MPIRUN="mpirun --map-by ppr:$MPIPROCS:node:PE=${CPUTASK} -np ${NPES}  ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+CMD_SUB="sbatch ${go_file_cmd}"
+CMD_SUBRST=${CMD_SUB}
+
+TSLEEP=$(awk "BEGIN{printf(\"%.0f\",$TIME*.9);}")
+if [ -z "$KNLMODE" ]; then
+    export KNLMODE=cache
+fi
+
+cat <<EOF > ${go_file_cmd} 
+#!/bin/bash
+#SBATCH -J $JOBNAME             # jobname
+#SBATCH --nodes=${NNODES}
+#SBTACH -n $NPES
+# BATCH --partition pcp
+#SBATCH -C quad,${KNLMODE}
+#SBATCH --ntasks-per-node=${MPIPROCS}
+# BATCH --threads-per-core=1
+#SBATCH --cpus-per-task=${CPUTASK}
+#SBATCH -t ${TIMEH}            # execute time (hh:mm:ss - max 08:00:00)
+# BATCH --mem=60GB
+#SBATCH --exclusive
+#SBATCH -o $JOBNAME%j.out      # strout filename (%j is jobid)
+#SBATCH -e $JOBNAME%j.out      # stderr filename (%j is jobid)
+
+ulimit -d unlimited
+ulimit -Sa
+ulimit -Ha
+ulimit -l unlimited
+
+module load intel/17.0 intelmpi/2017.1.132  szip/2.1 hdf5-sequential/1.8.17
+
+export I_MPI_DOMAIN=pin
+export I_MPI_PIN_RESPECT_CPUSET=0
+unset FORT_BUFFERED
+export MKL_DOMAIN_NUM_THREADS="MKL_BLAS=1"
+export MKL_NUM_THREADS="1"
+export MKL_DYNAMIC="FALSE"
+export MKL_ENABLE_INSTRUCTIONS=AVX2
+export I_MPI_DEBUG=5
+export I_MPI_PLATFORM=knl 
+export HFI_NO_CPUAFFINITY=1
+export KMP_AFFINITY=scatter,verbose
+#export KMP_HW_SUBSET=2T 
+export I_MPI_HBW_POLICY=hbw_preferred,hbw_preferred,hbw_preferred
+
+EOF
+
+;;      
+
+# -----------------------------------------------------------------
+# pcp (CINES)
+# -----------------------------------------------------------------
+pcp)
+
+# Directories
+HOMEDIR=${HOME}/${DIR}
+WKDIR=${HOMEDIR}/wk
+#RESDIR1=${HOME}/${SCRATCHDIR}/${DIR}
+RESDIR1=${WKDIR}
+
+# Creation of the work directory
+if [ ! -d ${RESDIR1} ]; then
+    mkdir -p ${RESDIR1}
+fi
+RESDIR=${RESDIR1}/${CASE}
+if [ ! -d ${RESDIR} ]; then
+    mkdir -p ${RESDIR}
+    ln -s ${RESDIR} ${CASE}
+fi
+
+# We launch 56 threads per node even with 28 cores.  
+if [ $NTHREAD -eq 34 -o $NTHREAD -eq 68 ]; then
+    ((THPNODE=136))
+else
+    ((THPNODE=128))
+fi
+((MPIPROCS=$THPNODE/$NTHREAD))
+((NCPUS=$NPES*$NTHREAD))
+((CPUTASK=$THPNODE/($MPIPROCS)))
+((NNODES=($THPNODE-1+$NPES*$NTHREAD)/$THPNODE))
+if [ $NNODES -eq 0 ]; then
+    ((NNODES=1))
+fi
+
+if [ $NTHREAD -ne 16 -a $NTHREAD -ne 32 -a $NTHREAD -ne 64 -a $NTHREAD -ne 34 -a $NTHREAD -ne 68 ]; then
+    echo "Please set NTHREAD to 32 (highly recommanded) or 16 or 34 or 64 or 68 in your input file"
+    exit
+fi
+#
+#CMD_MPIRUN="srun -K1 -m block:block  --resv-ports -n $NPES ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+#mpirun -n $NPES -bind-to core --mca mpi_preconnect_all 1  --map-by ppr:$MPIPROCS:node:PE=${CPUTASK} --report-bindings ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err
+CMD_MPIRUN="mpirun --map-by ppr:$MPIPROCS:node:PE=${CPUTASK} -np ${NPES}  ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+CMD_SUB="sbatch ${go_file_cmd}"
+CMD_SUBRST=${CMD_SUB}
+
+TSLEEP=$(awk "BEGIN{printf(\"%.0f\",$TIME*.9);}")
+
+cat <<EOF > ${go_file_cmd}
+#!/bin/bash
+#SBATCH -J $JOBNAME             # jobname
+#SBATCH -N ${NNODES}
+#SBATCH -n ${NPES}
+#SBATCH --partition pcp
+# BATCH -C quad,flat
+# BATCH --threads-per-core=1
+#SBATCH --cpus-per-task=${CPUTASK}
+#SBATCH --exclude=n10[54-55]
+#SBATCH -t ${TIMEH}            # execute time (hh:mm:ss - max 08:00:00)
+# BATCH --mem=60GB
+#SBATCH --exclusive
+#SBATCH -o $JOBNAME%j.out      # strout filename (%j is jobid)
+#SBATCH -e $JOBNAME%j.out      # stderr filename (%j is jobid)
+
+ulimit -d unlimited
+ulimit -Sa
+ulimit -Ha
+ulimit -l unlimited
+
+export I_MPI_DOMAIN=pin
+export I_MPI_PIN_RESPECT_CPUSET=0
+unset FORT_BUFFERED
+export MKL_DOMAIN_NUM_THREADS="MKL_BLAS=1"
+export MKL_NUM_THREADS="1"
+export MKL_DYNAMIC="FALSE"
+export MKL_ENABLE_INSTRUCTIONS=AVX2
+export I_MPI_DEBUG=5
+export I_MPI_PLATFORM=knl 
+export HFI_NO_CPUAFFINITY=1
+export KMP_AFFINITY=scatter,verbose
+export KMP_HW_SUBSET=2T 
+export I_MPI_HBW_POLICY=hbw_preferred,hbw_preferred,hbw_preferred
+
+EOF
+
+;;      
+
+# -----------------------------------------------------------------
+# Marconi KNL (Cineca Italie)
+# -----------------------------------------------------------------
+marconi_knl)
+
+# Directories
+# -----------
+HOMEDIR="$(readlink -f "$(dirname "$0")/..")"
+WKDIR=${HOMEDIR}/wk
+RESDIR1=${CINECA_SCRATCH}/${DIR}
+
+# Creation of the work directory
+# ------------------------------
+if [ ! -d ${RESDIR1} ]
+then
+    mkdir -p ${RESDIR1}
+fi
+RESDIR=${RESDIR1}/${CASE}
+if [ ! -d ${RESDIR} ]; then
+    mkdir -p ${RESDIR}
+    ln -s ${RESDIR} ${CASE}
+fi
+
+# Check exec_file and partition
+FLAG="xMIC-AVX512"
+objdump -s -j .rodata ${WKDIR}/${exec_file}|cut -c 46-|tr -d '\n'|tr -d ' '|grep -q $FLAG
+NOTFOUND=$?
+if [ ${NOTFOUND} -eq 1 ]; then
+    printf "Your executable does not correspond to 'KNL' \n"
+    exit 0
+fi
+
+# Batch control
+# -------------
+# A personalized production environment is instead in place for EUROfusion
+# You always have to specify the queue according to the needed resources
+# ----------------------
+((THPNODE=128))
+((MPIPROCS=$THPNODE/$NTHREAD))
+((NCPUS=$NPES*$NTHREAD))
+((CPUTASK=$THPNODE/(2*$MPIPROCS)))
+if [ $CPUTASK -eq 0 ]; then
+    ((CPUTASK=1))
+fi
+((NNODES=($THPNODE-1+$NPES*$NTHREAD)/$THPNODE))
+if [ $NNODES -eq 0 ]; then
+    ((NNODES=1))
+fi
+
+if [ $NTHREAD -ne 16 -a $NTHREAD -ne 32 ]; then
+    echo "Please set in your input file NTHREAD to 32 (recommanded) other choices are 16"
+    exit
+fi
+
+if [ -z "${PROJ}" ]; then
+    echo "Please set the environment variable PROJ to define the project you are in."
+    exit
+fi
+
+if [ -z "$KNLMODE" ]; then
+    export KNLMODE=cache
+fi
+
+CMD_MPIRUN="mpirun -genv I_MPI_FABRICS tmi:tmi -np ${NPES} numactl -l ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+CMD_SUB="sbatch ${go_file_cmd}"
+CMD_SUBRST="sbatch ${go_file_cmd}"
+
+TSLEEP=$(awk "BEGIN{printf(\"%.0f\",$TIME*.9);}")
+
+cat <<EOF > ${go_file_cmd}
+#!/bin/bash
+#SBATCH -J $JOBNAME                # jobname
+#SBATCH --nodes=${NNODES}
+#SBATCH --ntasks-per-node=${MPIPROCS}
+#SBATCH --threads-per-core=1
+#SBATCH --cpus-per-task=${CPUTASK}
+#SBATCH --time=${TIMEH}            # execute time (hh:mm:ss - max 08:00:00)
+#SBATCH --account=${PROJ}          # account number
+#SBATCH -o $JOBNAME%j.out          # strout filename (%j is jobid)
+#SBATCH -e $JOBNAME%j.out          # stderr filename (%j is jobid)
+#SBATCH --exclusive
+#SBATCH --partition=knl_fua_prod
+#SBATCH -C ${KNLMODE}
+##SBATCH -C quad,${KNLMODE}
+
+wrapper_pbs() { echo \$1 ; cd ${WKDIR}; \$1; }
+
+module load env-knl
+module load intel/pe-xe-2017--binary
+module load intelmpi/2017--binary szip/2.1--gnu--6.1.0  zlib/1.2.8--gnu--6.1.0 hdf5/1.8.17--intel--pe-xe-2017--binary
+
+#OLD module load mkl/2017--binary 
+source /cineca/prod/opt/compilers/intel/pe-xe-2017/binary/compilers_and_libraries_2017.1.132/linux/mkl/bin/mklvars.sh mic
+source /cineca/prod/opt/compilers/intel/pe-xe-2017/binary/compilers_and_libraries_2017.1.132/linux/bin/ifortvars.sh intel64
+source /cineca/prod/opt/compilers/intel/pe-xe-2017/binary/compilers_and_libraries_2017.1.132/linux/mpi/intel64/bin/mpivars.sh
+set -vx 
+export LANG=C
+export MKL_DOMAIN_NUM_THREADS="MKL_BLAS=1"
+#export MKL_VERBOSE=1
+export MKL_NUM_THREADS="1"
+export MKL_DYNAMIC="FALSE"
+export MKL_ENABLE_INSTRUCTIONS=AVX2
+export I_MPI_DEBUG=5
+export I_MPI_PLATFORM=knl 
+export I_MPI_HBW_POLICY=hbw_preferred,hbw_preferred,hbw_preferred
+export I_MPI_PIN_PROCESSOR_EXCLUDE_LIST=16,17,34,35,84,85,102,103,152,153,170,171,220,221,238,239 
+export PSM2_MQ_EAGER_SDMA_SZ=1000000
+#export I_MPI_TMI_PROVIDER=psm2
+#export HFI_NO_CPUAFFINITY=1
+export KMP_AFFINITY=verbose
+export KMP_HW_SUBSET=2T 
+ldd ${RESDIR}/${exec_file}
+numactl -H
+EOF
+
+printf " #Watch your job with:\n  squeue -u \$USER @skl1\n"
+printf " #Delete your job with:\n scancel Job_ID\n"
+
+;;
+
+# -----------------------------------------------------------------
+# Marconi SkyLake (Cineca Italie)
+# -----------------------------------------------------------------
+marconi_skl)
+
+# Directories
+# -----------
+HOMEDIR="$(readlink -f "$(dirname "$0")/..")"
+WKDIR=${HOMEDIR}/wk
+RESDIR1=${CINECA_SCRATCH}/${DIR}
+
+# Creation of the work directory
+# ------------------------------
+if [ ! -d ${RESDIR1} ]
+then
+    mkdir -p ${RESDIR1}
+fi
+RESDIR=${RESDIR1}/${CASE}
+if [ ! -d ${RESDIR} ]; then
+    mkdir -p ${RESDIR}
+    ln -s ${RESDIR} ${CASE}
+fi
+
+# Check exec_file and partition
+#FLAG="xCORE-AVX512"
+#objdump -s -j .rodata ${WKDIR}/${exec_file}|cut -c 46-|tr -d '\n'|tr -d ' '|grep -q $FLAG
+#NOTFOUND=$?
+#if [ ${NOTFOUND} == "1" ]; then
+    #printf "Your executable does not correspond to 'SKL' \n"
+    #exit 0
+#fi
+
+# Batch control
+# -------------
+# A personalized production environment is instead in place for EUROfusion
+# You always have to specify the queue according to the needed resources
+# ----------------------
+((THPNODE=48))
+((MPIPROCS=$THPNODE/$NTHREAD))
+((NCPUS=$NPES*$NTHREAD))
+((CPUTASK=$THPNODE/($MPIPROCS)))
+if [ $CPUTASK -eq 0 ]; then
+    ((CPUTASK=1))
+fi
+((NNODES=($THPNODE-1+$NPES*$NTHREAD)/$THPNODE))
+if [ $NNODES -eq 0 ]; then
+    ((NNODES=1))
+fi
+
+if [ $NTHREAD -ne 12 -a $NTHREAD -ne 24 ]; then
+    echo "Please set NTHREAD to 24 (highly recommanded) or 12 in your input file"
+    exit
+fi
+
+# Batch Scheduler SLURM
+#  ----------------------------------------------------------------------------------------------------
+# | Partition    | QOS              | min/max   | Nb    | wall   | max    | prio | notes               |
+# |              |                  | nodes/job | cpus  | time   | memory |      | 	               |
+# |--------------|------------------|-----------|-------| -------|--------|------|---------------------|
+# | skl_fua_prod | no QOS           |  65 max   |  3120 |  24:00 | 182000 |  40  | 	               |
+# | skl_fua_prod | skl_qos_fuabprod |  66 min   |  3168 |  24:00 | 182000 |  85  | 1024 nodes total    |
+# |              |                  | 256 max   | 12288 |        |        |      | 	               |
+# | skl_fua_prod | skl_qos_fualprod |  11 max   |   528 |  72:00 | 182000 |  85  | 22 nodes/user       |
+# |              |                  |           |       |        |        |      | Max 66 nodes total  |
+#  ----------------------------------------------------------------------------------------------------
+
+QUEUE_NAME="skl_fua_prod"
+QOS_NAME=""
+if [ ${NCPUS} -ge "3168" ] && [ ${NCPUS} -le "12288" ]; then
+    QOS_NAME="skl_qos_fuabprod"
+    if  [ ${TIME} -ge "86400" ]; then
+	TIMEH="24:00:00"
+    fi
+else
+    if [ ${NCPUS} -le "3120" ]; then
+	if [ ${TIME} -gt "86400" ]; then
+	    TIMEH="24:00:00"
+	fi
+	if [ ${NCPUS} -le "528" ] && [ ${TIME} -gt "259200" ]; then
+	    QOS_NAME="skl_qos_fualprod"
+	    TIMEH="72:00:00"
+	fi
+    fi
+fi
+
+if [ -z "${QUEUE_NAME}" ]; then
+    echo " No queue batch available for this number of cores " ${NCPUS}
+    exit
+else
+    echo " Queue Name = " $QUEUE_NAME
+    echo " QOS        = " $QOS_NAME
+    echo " Walltime   = " $TIMEH
+fi
+
+if [ -z "${PROJ}" ]; then
+    echo "Please set the environment variable PROJ to define the project you are in."
+    exit
+fi
+
+#CMD_MPIRUN="mpirun -genv I_MPI_FABRICS shm:tmi --map-by ppr:${MPIPROCS}:node:PE=${CPUTASK}  -np ${NPES} ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+CMD_MPIRUN="srun -n ${NPES} --cpus-per-task=${CPUTASK} ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+CMD_SUB="sbatch ${go_file_cmd}"
+CMD_SUBRST="sbatch ${go_file_cmd}"
+
+TSLEEP=$(awk "BEGIN{printf(\"%.0f\",$TIME*.9);}")
+
+cat <<EOF > ${go_file_cmd}
+#!/bin/bash
+#SBATCH -J $JOBNAME                # jobname
+#SBATCH --nodes=${NNODES}
+#SBATCH --ntasks-per-node=${MPIPROCS}
+#SBATCH --threads-per-core=1
+#SBATCH --cpus-per-task=${CPUTASK}
+#SBATCH --time=${TIMEH}            # execute time (hh:mm:ss - max 08:00:00)
+#SBATCH --account=${PROJ}          # account number
+#SBATCH -o $JOBNAME%j.out          # strout filename (%j is jobid)
+#SBATCH -e $JOBNAME%j.out          # stderr filename (%j is jobid)
+#SBATCH --exclusive
+#SBATCH --partition=${QUEUE_NAME}
+EOF
+if [ ! -z ${QOS_NAME} ]; then
+    cat <<EOF >> ${go_file_cmd}
+#SBATCH --qos=${QOS_NAME}
+EOF
+fi
+
+if [ "${OPTIONALMODE}" = "SCOREP" ]; then
+    cat <<EOF >> ${go_file_cmd}
+
+module load cubelib scorep
+EOF
+fi
+
+
+cat <<EOF >> ${go_file_cmd}
+
+wrapper_pbs() { echo \$1 ; cd ${WKDIR}; \$1; }
+
+export LANG=C
+export MKL_DOMAIN_NUM_THREADS="MKL_DOMAIN_ALL=1"
+export MKL_ENABLE_INSTRUCTIONS="AVX512"
+export MKL_NUM_THREADS="1"
+export MKL_DYNAMIC="FALSE"
+export I_MPI_DEBUG=5
+export I_MPI_FABRICS=shm:ofi
+export I_MPI_OFI_PROVIDER=psm2
+export KMP_AFFINITY=verbose
+export KMP_HW_SUBSET=1T
+
+EOF
+
+printf " #Watch your job with:\n  squeue -u \$USER @skl1\n" 
+printf " #Delete your job with:\n scancel Job_ID\n" 
+
+;;
+
+# -----------------------------------------------------------------
+# JFRS1 (SkyLake, IFERC Japan)
+# -----------------------------------------------------------------
+jfrs1)
+
+# Directories
+# -----------
+HOMEDIR="$(readlink -f "$(dirname "$0")/..")"
+WKDIR=${HOMEDIR}/wk
+RESDIR1=${WORK}/${DIR}
+
+# Creation of the work directory
+# ------------------------------
+if [ ! -d ${RESDIR1} ]
+then
+    mkdir -p ${RESDIR1}
+fi
+RESDIR=${RESDIR1}/${CASE}
+if [ ! -d ${RESDIR} ]; then
+    mkdir -p ${RESDIR}
+#    ln -s ${RESDIR} ${CASE}
+fi
+
+# Check exec_file and partition
+FLAG="xCORE-AVX512"
+objdump -s -j .rodata ${WKDIR}/${exec_file}|cut -c 46-|tr -d '\n'|tr -d ' '|grep -q $FLAG
+NOTFOUND=$?
+if [ ${NOTFOUND} == "1" ]; then
+    printf "Your executable does not correspond to 'SKL' \n"
+    exit 0
+fi
+
+# Batch control
+# -------------
+# You always have to specify the queue according to the needed resources
+# ----------------------
+((NPES=NPROC_R*NPROC_TH*NPROC_MU*NSPECIES))
+((THPNODE=40))
+((MPIPROCS=$THPNODE/$NTHREAD))
+((NCPUS=$NPES*$NTHREAD))
+((CPUTASK=2*$THPNODE/($MPIPROCS))) # number of logical cores
+if [ $CPUTASK -eq 0 ]; then
+    ((CPUTASK=1))
+fi
+((NNODES=($THPNODE-1+$NPES*$NTHREAD)/$THPNODE))
+if [ $NNODES -eq 0 ]; then
+    ((NNODES=1))
+fi
+
+if [ $NTHREAD -ne 10 -a $NTHREAD -ne 20 ]; then
+    echo "Please set NTHREAD to 20 (highly recommanded) or 10 in your input file, and also bloc_phi=1"
+    exit
+fi
+
+# Batch Scheduler SLURM
+# NCPUS = Number Cores per node
+# WLT = Walltime
+
+## Mode LL
+#    256*40<NCPUS<=1370*40
+#    WLT=24:00
+## Mode L (normal job)
+#    26*40<NCPUS<=256*40
+#    WLT=24:00
+## Mode S-M (normal job)
+#    NCPUS<=1040
+#    WLT=24:00
+## Mode dev
+#    NCPUS<=80
+#    WLT=3:00
+
+echo " NCPUS = ................" $NCPUS
+QUEZUE_NAME=""
+QOS_NAME=""
+# LL class
+if [ ${NCPUS} -gt "10240" ] && [ ${NCPUS} -le "54800" ]; then
+    QUEUE_NAME="LL"
+    if  [ ${TIME} -ge "86400" ]; then
+        TIMEH="24:00:00"
+    fi
+fi
+# L class
+if [ ${NCPUS} -gt "1040" ] && [ ${NCPUS} -le "10240" ]; then
+    QUEUE_NAME="L"
+    if  [ ${TIME} -ge "86400" ]; then
+        TIMEH="23:59:00"
+    fi
+fi
+# S-M class
+if [ ${NCPUS} -gt "80" ] && [ ${NCPUS} -le "1040" ]; then
+    QUEUE_NAME="S-M"
+    if  [ ${TIME} -ge "86400" ]; then
+        TIMEH="23:59:00"
+    fi
+fi
+# dev class
+if [ ${NCPUS} -le "80" ]; then
+    QUEUE_NAME="dev"
+    if  [ ${TIME} -ge "10800" ]; then
+        TIMEH="3:00:00"
+    fi
+fi
+
+if [ -z "${QUEUE_NAME}" ]; then
+    echo " No queue batch available for this number of cores " ${NCPUS}
+    exit
+else
+    echo " Queue Name = " $QUEUE_NAME
+    echo " QOS        = " $QOS_NAME
+    echo " Walltime   = " $TIMEH
+fi
+
+if [ -z "${PROJ}" ]; then
+    echo "Please set the environment variable PROJ to define the project you are in."
+    exit
+fi
+
+CMD_MPIRUN="srun ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+CMD_SUB="sbatch ${go_file_cmd}"
+CMD_SUBRST="sbatch ${go_file_cmd}"
+
+TSLEEP=$(awk "BEGIN{printf(\"%.0f\",$TIME*.9);}")
+
+cat <<EOF > ${go_file_cmd}
+#!/bin/bash
+#SBATCH -J $JOBNAME                # jobname
+#SBATCH --nodes=${NNODES}
+#SBATCH --ntasks=${NPES}              # Number of tasks (processes)
+#SBATCH --ntasks-per-node=${MPIPROCS}
+#SBATCH --cpus-per-task=${CPUTASK}
+#SBATCH --time=${TIMEH}            # execute time
+#SBATCH --account=${PROJ}          # account number
+#SBATCH -o $JOBNAME%j.out          # strout filename (%j is jobid)
+#SBATCH -e $JOBNAME%j.out          # stderr filename (%j is jobid)
+#SBATCH --exclusive
+#SBATCH --partition=${QUEUE_NAME}
+EOF
+if [ ! -z ${QOS_NAME} ]; then
+    cat <<EOF >> ${go_file_cmd}
+#SBATCH --qos=${QOS_NAME}
+EOF
+fi
+
+cat <<EOF >> ${go_file_cmd}
+
+wrapper_pbs() { echo \$1 ; cd ${WKDIR}; \$1; }
+
+# In order to run program compiled on non-cray environment
+source /opt/modules/default/init/bash
+module switch PrgEnv-cray PrgEnv-intel
+module unload cray-libsci/19.02.1
+module load intel
+module list
+
+export LANG=C
+export MKL_DOMAIN_NUM_THREADS="MKL_BLAS=1"
+export MKL_ENABLE_INSTRUCTIONS=AVX2
+export MKL_NUM_THREADS="1"
+export MKL_DYNAMIC="FALSE"
+export I_MPI_DEBUG=5
+export KMP_AFFINITY=verbose
+export KMP_HW_SUBSET=1T
+
+export OMP_NUM_THREADS=$NTHREAD # Thread number for Open MP
+export OMP_STACKSIZE=16M # To increase the stacksize
+
+ulimit -s unlimited
+
+EOF
+
+;;
+
+# -----------------------------------------------------------------
+# Poincare (Maison de la Simulation)
+# -----------------------------------------------------------------
+poincare*)
+
+# Directories
+# -----------
+HOMEDIR="$(readlink -f "$(dirname "$0")/..")"
+WKDIR=${PWD}
+WORKDIR=/gpfsdata/$USER
+
+if [ -n "$LOCALWK" ]; then
+    RESDIR1=${PWD}  
+else
+    RESDIR1=${WORKDIR}/${DIR}
+fi
+
+# Creation of the work directory
+# ------------------------------
+if [ ! -d ${RESDIR1} ]
+then
+    mkdir -p ${RESDIR1}
+fi
+RESDIR=${RESDIR1}/${CASE}
+if [ ! -d ${RESDIR} ]; then
+    mkdir -p ${RESDIR}
+    ln -s ${RESDIR} ${CASE}
+fi
+
+# Batch control
+# -------------
+((MPIPROCS=16/$NTHREAD))
+((NCPUS=NPES*NTHREAD))
+((NNODES=(NPES*NTHREAD)/16))
+if [ $NNODES -eq 0 ]; then
+    ((NNODES=1))
+fi
+if [ -n "$WAITJOBEND" ]; then
+    CMD_SUB="llsubmit -s ${go_file_cmd}"
+else
+    CMD_SUB="llsubmit ${go_file_cmd}"
+fi
+
+CMD_MPIRUN="mpirun -ppn $MPIPROCS -bind-to core --map-by ppr:$MPIPROCS:node:PE=${NTHREAD} -f \$LOADL_HOSTFILE -n \$LOADL_TOTAL_TASKS ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+if [ -n "$WAITJOBEND" ]; then
+    CMD_SUBRST="sleep 50 ; wrapper_pbs '${CMD_SUB}'; cat '${RESDIR}/gysela_log.out' '${RESDIR}/gysela_res.err'"
+else
+    CMD_SUBRST="sleep 30 ; wrapper_pbs '${CMD_SUB}'"
+fi
+
+TSLEEP=$(awk "BEGIN{printf(\"%.0f\",$TIME*.9);}")
+
+cat <<EOF > ${go_file_cmd}
+#!/bin/bash
+# @ job_name = $JOBNAME
+# @ as_limit = 24Gb
+# @ class = clallmds+
+# @ error = \$(job_name).\$(jobid).err
+# @ output = \$(job_name).\$(jobid).out
+# @ environment = COPY_ALL
+# @ wall_clock_limit = ${TIMEH}
+# @ job_type = mpich
+# @ restart = no
+# @ node = ${NNODES}
+# @ total_tasks = ${NPES}
+# @ resources = ConsumableCpus(${NTHREAD})
+# @ node_usage = not_shared
+# @ queue
+
+wrapper_pbs() { echo \$1 ; cd ${WKDIR}; \$1; }
+
+#set -vx 
+export LANG=C
+
+# The following line corresponds to the mkl use and to avoids
+# problem of an automatic module load that can fail: module load mkl/11.2
+#export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/intel/composer_xe_2015.0.090/compiler/lib/intel64
+#export I_MPI_DEBUG=5
+#export HFI_NO_CPUAFFINITY=1
+export KMP_AFFINITY=compact,verbose
+export I_MPI_FABRICS="shm:tmi"
+EOF
+
+;;
+
+# -----------------------------------------------------------------
+# Marenostrum (BSC)
+# -----------------------------------------------------------------
+mnbsc*)
+
+# Directories
+# -----------
+HOMEDIR=$(dirname $PWD)
+WKDIR=${PWD}
+RESDIR1=${WKDIR}
+
+# Creation of the work directory
+# ------------------------------
+if [ ! -d ${RESDIR1} ]
+then
+    mkdir -p ${RESDIR1}
+fi
+
+# Check exec_file and partition
+FLAG="xCORE-AVX512"
+objdump -s -j .rodata ${WKDIR}/${exec_file}|cut -c 46-|tr -d '\n'|tr -d ' '|grep -q $FLAG
+NOTFOUND=$?
+if [ ${NOTFOUND} == "1" ]; then
+    printf "Your executable does not correspond to 'SKL' \n"
+    exit 0
+fi
+
+RESDIR=${RESDIR1}/${CASE}
+if [ "${OPTIONALMODE}" = "DEBUG" ]; then
+    echo " ==> run with executable in DEBUG mode "
+    RESDIR=${RESDIR}_DBG
+    CASE=${CASE}_DBG
+fi
+if [ "${OPTIONALMODE}" = "TIMER" ]; then
+    echo " ==> run with executable in TIMER mode "
+    RESDIR=${RESDIR}_TI
+    CASE=${CASE}_TI
+fi
+if [ ! -d ${RESDIR} ]; then
+    mkdir -p ${RESDIR}
+fi
+
+# MN has nodes with We launch 32 threads per MPI processes even with 24 cores.
+#((MPIPROCS=16/$NTHREAD))
+((THPNODE=24))
+((MPIPROCS=$THPNODE/$NTHREAD))
+((NCPUS=$NPES*$NTHREAD))
+((CPUTASK=$THPNODE/$MPIPROCS))
+if [ $CPUTASK -eq 0 ]; then
+    ((CPUTASK=1))
+fi
+((NNODES=($THPNODE-1+$NPES*$NTHREAD)/$THPNODE))
+if [ $NNODES -eq 0 ]; then
+  ((NNODES=1))
+fi
+
+if [ $NTHREAD -ne 12 -a $NTHREAD -ne 24 ]; then
+    echo "Please set NTHREAD to 24 (highly recommanded) or 12 in your input file"
+    exit
+fi
+
+# MN only recognise HH:MM
+TIMEM=$(echo $TIMEH | cut -d: -f 1-2)
+
+# Batch control
+# -------------
+CMD_MPIRUN="mpirun -np ${NPES} ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+CMD_SUB="sbatch ./${go_file_cmd}"
+CMD_SUBRST=${CMD_SUB}
+
+TSLEEP=$(awk "BEGIN{printf(\"%.0f\",$TIME*.9);}")
+
+cat <<EOF > ${go_file_cmd}
+#!/bin/bash
+#SBATCH --job-name=$JOBNAME
+#SBATCH --qos=prace
+#SBATCH --workdir=.
+#SBATCH --error=$JOBNAME%j.out
+#SBATCH --output=$JOBNAME%j.out
+#SBATCH --nodes=${NNODES}
+#SBATCH --threads-per-core=1
+#SBATCH --cpus-per-task=${CPUTASK}
+#SBATCH --time=${TIMEH}            # execute time (hh:mm:ss - max 08:00:00)
+#SBATCH -o $JOBNAME%j.out          # strout filename (%j is jobid)
+#SBATCH -e $JOBNAME%j.out          # stderr filename (%j is jobid)
+#SBATCH --exclusive
+
+##SBATCH --ntasks-per-node=${MPIPROCS}
+# Hhigh memory
+##SBATCH --constraint=highmem
+
+module load bsc/1.0 prace 
+module load intel/2018.4 impi/2018.4 mkl/2018.4 hdf5/1.8.19 szip/2.1.1
+export OMP_NUM_THREADS=${NTHREAD}
+
+EOF
+
+;;
+
+# -----------------------------------------------------------------
+# ruche (Centrale Supelec Paris-Saclay)
+# -----------------------------------------------------------------
+ruche)
+
+# Directories
+HOMEDIR=/gpfs/users/racliuspa/StageM1_DDN/gysela2/gysela-master
+#HOMEDIR="$(readlink -f "$(dirname "$0")/..")"
+#WKDIR=${HOMEDIR}/wk
+WKDIR=/gpfs/users/racliuspa/StageM1_DDN/gysela2/gysela-master/wk
+
+# Creation of the work directory
+RESDIR=${WKDIR}/${CASE}
+echo " RESDIR " $RESDIR
+if [ ! -d ${RESDIR} ]; then
+    mkdir -p ${RESDIR}
+fi
+
+# 2 x Intel Xeon Gold 6230 20C @ 2.1GHz
+((THPNODE=40))
+((MPIPROCS=$THPNODE/$NTHREAD))
+((CPUTASK=$THPNODE/($MPIPROCS)))
+if [ $CPUTASK -eq 0 ]; then
+    ((CPUTASK=1))
+fi
+((NNODES=($THPNODE-1+$NPES*$NTHREAD)/$THPNODE))
+if [ $NNODES -eq 0 ]; then
+    ((NNODES=1))
+fi
+
+if [ -n "$WAITJOBEND" ]; then
+    CMD_SUB="sbatch -W ${go_file_cmd}"
+else
+    CMD_SUB="sbatch ${go_file_cmd}"
+fi
+export LD_PRELOAD=/gpfs/users/racliuspa/StageM1_DDN/darshan-lib/usr/local/lib/libdarshan.so
+#export exec_file=/gpfs/users/racliuspa/StageM1_DDN/ior-3.3.0/src/ior
+export DARSHAN_ENABLE_NONMPI=1
+export DXT_ENABLE_IO_TRACE=1
+# Batch control
+#CMD_MPIRUN="mpirun -np ${NPES} ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+#ldd /gpfs/users/racliuspa/StageM1_DDN/gysela2/gysela-master/wk/DR_SMALLEST.0/gysela.exe > lddGysela.txt
+#echo $LD_LIBRARY_PATH
+CMD_MPIRUN="srun --export=ALL '${exec_file}' 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+#CMD_MPIRUN="time srun ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+
+if [ -n "$WAITJOBEND" ]; then
+    CMD_SUBRST="sleep 50 ; wrapper_pbs '${CMD_SUB}'; cat '${RESDIR}/gysela_log.out' '${RESDIR}/gysela_res.err'"
+else
+    CMD_SUBRST="sleep 30 ; wrapper_pbs '${CMD_SUB}'"
+fi
+
+TSLEEP=$(awk "BEGIN{printf(\"%.0f\",$TIME*.9);}")
+
+#CPU partitions
+# partition   Nb nodes Nb cores Max mem  Walltime
+#                       /node    /node    max
+# cpu_short   [1-10]   [1-40]   180 GB   01:00:00   this partition is meant for test and therefore restricted to 1 job per user.
+# cpu_med     [1-10]   [1-40]   180 GB   04:00:00
+# cpu_long    [1-2]    [1-40]   180 GB   72:00:00
+# cpu_prod    [1-50]   [1-40]   180 GB   06:00:00   the cpu_prod partition is allowed to run jobs :
+#                                                   at night during weekdays (from 20 pm to 8 am)
+#                                                   all day long during the weekend
+PART="cpu_short"
+
+if [ ${NNODES} -le "10" ]; then
+    if [ ${TIME} -le "3600" ]; then
+	PART="cpu_short"
+    fi
+    if [ ${TIME} -ge "3600" ] && [ ${TIME} -le "14400" ]; then
+	PART="cpu_med"
+    fi
+    if [ ${TIME} -gt "14400" ]; then
+	TIMEH="06:00:00"
+	PART="cpu_prod"
+    fi
+fi
+if [ ${NNODES} -le "2" ]; then
+    if [ ${TIME} -gt "21600" ]; then
+	PART="cpu_long"
+    fi
+    if [ ${TIME} -ge "259200" ]; then
+	PART="cpu_long"
+	TIMEH="72:00:00"
+    fi
+    if [ ${PART} == "cpu_long" ] && [ ${NPES} -gt "80" ]; then
+	printf ' ==> \033[0;31mMax Ncpus allowed per user > 80 ,for partition=cpu_long !\033[1;m'
+	echo ""
+    fi
+fi
+if [ ${NNODES} -ge "10" ]; then
+    TIMEH="06:00:00"
+    PART="cpu_prod"
+fi
+echo " NNODES " ${NNODES}
+echo " TIME   " ${TIME}
+echo " TIMEH  " $TIMEH
+echo " PART   " $PART
+
+cat <<EOF > ${go_file_cmd}
+#!/bin/bash
+#SBATCH -J $JOBNAME
+#SBATCH --ntasks=${NPES}
+#SBATCH --cpus-per-task=${NTHREAD}
+#SBATCH --time=$TIMEH
+#SBATCH --partition=${PART}
+#SBATCH -o $JOBNAME%j.out
+#SBATCH -e $JOBNAME%j.out
+
+## SBATCH --nodes=${NNODES}
+## SBATCH --ntasks-per-node=${MPIPROCS}    # Number of tasks (MPI processes) per node
+## SBATCH --cpus-per-task=1  #${CPUTASK}   # Number of threads per task (Ex: Openmp threads per MPI proces):
+
+wrapper_pbs() { echo \$1 ; cd ${WKDIR}; \$1; }
+
+export OMP_NUM_THREADS=${NTHREAD}
+
+EOF
+
+;;
+# -----------------------------------------------------------------
+# juwels (Jülich Supercomputing Centre (JSC)
+# -----------------------------------------------------------------
+juwels)
+
+# Directories
+HOMEDIR="$(readlink -f "$(dirname "$0")/..")"
+WKDIR=${HOMEDIR}/wk
+RESDIR1=${SCRATCH}/${USER}/${DIR}
+
+
+# Creation of the work directory
+if [ ! -d ${RESDIR1} ]; then
+    mkdir -p ${RESDIR1}
+fi
+RESDIR=${RESDIR1}/${CASE}
+if [ ! -d ${RESDIR} ]; then
+    mkdir -p ${RESDIR}
+    ln -s ${RESDIR} ${CASE}
+fi
+
+# 2× Intel Xeon Platinum 8168 CPU, 2× 24 cores, 2.7 GHz
+((THPNODE=48))
+((MPIPROCS=$THPNODE/$NTHREAD))
+((CPUTASK=$THPNODE/($MPIPROCS)))
+if [ $CPUTASK -eq 0 ]; then
+    ((CPUTASK=1))
+fi
+((NNODES=($THPNODE-1+$NPES*$NTHREAD)/$THPNODE))
+if [ $NNODES -eq 0 ]; then
+    ((NNODES=1))
+fi
+
+# Batch control
+CMD_MPIRUN="srun --cpu-bind=rank -n ${NPES} ${RESDIR}/${exec_file} 1>> ${RESDIR}/gysela_log.out 2>> ${RESDIR}/gysela_res.err"
+CMD_SUB="sbatch ${go_file_cmd}"
+CMD_SUBRST=${CMD_SUB}
+
+TSLEEP=$(awk "BEGIN{printf(\"%.0f\",$TIME*.9);}")
+
+cat <<EOF > ${go_file_cmd}
+#!/bin/bash
+#SBATCH -J ${JOBNAME}
+#SBATCH --account=prcoe03
+#SBATCH --nodes=${NNODES}
+#SBATCH --ntasks=${NPES}
+#SBATCH --threads-per-core=1
+#SBATCH --cpus-per-task=${NTHREAD}
+#SBATCH --time=$TIMEH
+#SBATCH --output=${JOBNAME}_%j.out
+#SBATCH --error=${JOBNAME}_%j.out
+EOF
+
+if [ "${OPTIONALMODE}" = "SCOREP" ]; then
+    cat <<EOF >> ${go_file_cmd}
+
+module load Score-P
+EOF
+fi
+
+
+cat <<EOF >> ${go_file_cmd}
+
+wrapper_pbs() { echo \$1 ; cd ${WKDIR}; \$1; }
+
+export MKL_DOMAIN_NUM_THREADS="MKL_DOMAIN_ALL=1"
+export MKL_ENABLE_INSTRUCTIONS="AVX512"
+export MKL_NUM_THREADS="1"
+export MKL_DYNAMIC="FALSE"
+export I_MPI_DEBUG=5
+
+export OMP_NUM_THREADS=${NTHREAD}
+export KMP_AFFINITY="verbose,granularity=fine,compact,0,0"
+
+EOF
+
+;;
+
+*)
+esac
+
+
+if [ "${OPTIONALMODE}" = "SCOREP" ]; then
+    if [ -f "${WKDIR}/${DATANAME}.scorep" ]; then
+        cat "${WKDIR}/${DATANAME}.scorep" >> ${go_file_cmd}
+    elif [ -f "${WKDIR}/default.scorep" ]; then
+        cat "${WKDIR}/default.scorep" >> ${go_file_cmd}
+        echo "  No ${DATANAME}.scorep found, default.scorep used instead."
+    else
+        echo "  No scorep parameter file found."
+    fi
+    
+    if [ -f "${WKDIR}/${DATANAME}.filter" ]; then
+        echo "export SCOREP_FILTERING_FILE=${WKDIR}/${DATANAME}.filter" >> ${go_file_cmd}
+    elif [ -f "${WKDIR}/default.filter" ]; then
+        echo "export SCOREP_FILTERING_FILE=${WKDIR}/default.filter" >> ${go_file_cmd}
+        echo "  No ${DATANAME}.filter found, default.filter used instead."
+    else
+        echo "  No scorep filter file found."
+    fi
+fi
+
+
+
+
+# Data file
+# ---------
+grep "&PARALLEL" -A 500 $1 > data.${CASE}
+
+sed -i "s/  Nspecies .*/  Nspecies     = $NSPECIES/"  data.${CASE}
+sed -i "s/  Nbproc_r .*/  Nbproc_r     = $NPROC_R/"  data.${CASE}
+sed -i "s/  Nbproc_theta .*/  Nbproc_theta = $NPROC_TH/" data.${CASE}
+sed -i "s/  Nbproc_mu .*/  Nbproc_mu    = $NPROC_MU/" data.${CASE}
+sed -i "s/  Nbthread .*/  Nbthread     = $NTHREAD/"  data.${CASE}
+sed -i "s/  Nmu .*/  Nmu            = $((NPROC_MU-1))/"  data.${CASE}
+
+# Names of the profile files
+# --------------------------
+ns0_sp0_filename=`grep ns0_sp0_filename $DATANAME | head -n 1 | tr -s '=' ' ' |  awk '{print $2}'`
+ns0_sp1_filename=`grep ns0_sp1_filename $DATANAME | head -n 1 | tr -s '=' ' ' |  awk '{print $2}'`
+Ts0_sp0_filename=`grep Ts0_sp0_filename $DATANAME | head -n 1 | tr -s '=' ' ' |  awk '{print $2}'`
+Te0_filename=`grep Te0_filename $DATANAME | head -n 1 | tr -s '=' ' ' |  awk '{print $2}'`
+Ts0_sp1_filename=`grep Ts0_sp1_filename $DATANAME | head -n 1 | tr -s '=' ' ' |  awk '{print $2}'`
+q_filename=`grep q_filename $DATANAME | head -n 1 | tr -s '=' ' ' |  awk '{print $2}'`
+read_q=`grep read_q $DATANAME | head -n 1 | tr -s '=' ' ' |  awk '{print $2}'`
+Vpars0_sp0_filename=`grep Vpars0_sp0_filename $DATANAME | head -n 1 | tr -s '=' ' ' |  awk '{print $2}'`
+Vpars0_sp1_filename=`grep Vpars0_sp1_filename $DATANAME | head -n 1 | tr -s '=' ' ' |  awk '{print $2}'`
+ripple_filename=`grep ripple_filename $DATANAME | head -n 1 | tr -s '=' ' ' |  awk '{print $2}'`
+TF_ripple=`grep TF_ripple $DATANAME | head -n 1 | tr -s '=' ' ' |  awk '{print $2}'`
+buffer_filename=`grep buffer_filename $DATANAME | head -n 1 | tr -s '=' ' ' |  awk '{print $2}'`
+read_buffer_profile=`grep read_buffer_profile $DATANAME | head -n 1 | tr -s '=' ' ' | tr '[:upper:]' '[:lower:]' |  awk '{print $2}'`
+pulse_filename_r=`grep pulse_filename_r $DATANAME | head -n 1 | tr -s '=' ' ' |  awk '{print $2}'`
+pulse_filename_th=`grep pulse_filename_th $DATANAME | head -n 1 | tr -s '=' ' ' |  awk '{print $2}'`
+pulse_filename_phi=`grep pulse_filename_phi $DATANAME | head -n 1 | tr -s '=' ' ' |  awk '{print $2}'`
+read_pulse_profile=`grep read_pulse_profile $DATANAME | head -n 1 | tr -s '=' ' ' | tr '[:upper:]' '[:lower:]' |  awk '{print $2}'`
+
+# Reading of the input file for
+# ns0, Ts0, Te0 and q if they exist 
+# ------------------------------
+for ((ns=0;ns<=${NSPECIES}-1;ns++)); do
+    if [ $ns -eq "0" ]; then
+	#--> for density reading of first species
+	ns0_filename=${ns0_sp0_filename}
+	ns0_GYS="ns0_sp0.dat"
+	read_ns0=`grep read_ns0 $DATANAME | head -n 1 | tr -s '=' ' ' | tr -s ',' ' ' | awk '{print $2}'`
+	#--> for temperature reading of first species
+	Ts0_filename=${Ts0_sp0_filename}
+	Ts0_GYS="Ts0_sp0.dat"
+	read_Ts0=`grep read_Ts0 $DATANAME | head -n 1 | tr -s '=' ' ' | tr -s ',' ' ' | awk '{print $2}'`
+	#--> for temperature reading of the electrons
+	Te0_filename=${Te0_filename}
+	Te0_GYS="Te0.dat"
+	read_Te0=`grep read_Te0 $DATANAME | head -n 1 | tr -s '=' ' ' | tr -s ',' ' ' | awk '{print $2}'`
+	#--> for Vpars0 of first species
+	Vpars0_filename=${Vpars0_sp0_filename}
+	Vpars0_GYS="Vpars0_sp0.dat"
+	read_Vpars0=`grep read_Vpars0 $DATANAME | head -n 1 | tr -s '=' ' ' | tr -s ',' ' ' | awk '{print $2}'`	
+    fi 
+    if [ $ns -eq "1" ]; then
+	#--> for density reading of second species
+	ns0_filename=${ns0_sp1_filename}
+	ns0_GYS="ns0_sp1.dat"
+	read_ns0=`grep read_ns0 $DATANAME | head -n 1 | tr -s '=' ' ' | tr -s ',' ' ' | awk '{print $3}'`
+	#--> for temperature reading of second species
+	Ts0_filename=${Ts0_sp1_filename}
+	Ts0_GYS="Ts0_sp1.dat"
+	read_Ts0=`grep read_Ts0 $DATANAME | head -n 1 | tr -s '=' ' ' | tr -s ',' ' ' | awk '{print $3}'`
+	#--> for Vpars0 of second species
+	Vpars0_filename=${Vpars0_sp1_filename}
+	Vpars0_GYS="Vpars0_sp1.dat"
+	read_Vpars0=`grep read_Vpars0 $DATANAME | head -n 1 | tr -s '=' ' ' | tr -s ',' ' ' | awk '{print $3}'`	
+    fi
+    #--> copy of the file containing the ion density profile
+    if [ "$read_ns0" == '.true.' ]; then
+	echo " => reading of the file " ${ns0_filename} "for species " ${ns}
+	if [ -e ${ns0_filename} ]; then
+	    cp ${ns0_filename} ${RESDIR}/${ns0_GYS}
+	else
+	    echo "The file " ${ns0_filename} " does not exist for species " ${ns}
+	    exit
+	fi
+    fi
+    #--> copy of the file containing the ion temperature profile
+    if [ "$read_Ts0" == '.true.' ]; then
+	echo " => reading of the file " ${Ts0_filename} "for species " ${ns}
+	if [ -e ${Ts0_filename} ]; then
+	    cp ${Ts0_filename} ${RESDIR}/${Ts0_GYS}
+	else
+	    echo "The file " ${Ts0_filename} " does not exist for species " ${ns}
+	    exit
+	fi
+    fi
+    #--> copy of the file containing the electron temperature profile
+    if [ "$read_Te0" == '.true.' ]; then
+	echo " => reading of the file " ${Te0_filename}
+	if [ -e ${Te0_filename} ]; then
+	    cp ${Te0_filename} ${RESDIR}/${Te0_GYS}
+	else
+	    echo "The file " ${Te0_filename} " does not exist "
+	    exit
+	fi
+    fi
+    #--> copy of the file containing the parallel velocity profile
+    if [ "$read_Vpars0" == '.true.' ]; then
+       echo " => reading of the file " ${Vpars0_filename}
+       if [ -e ${Vpars0_filename} ]; then
+          cp ${Vpars0_filename}  ${RESDIR}/${Vpars0_GYS}
+       else
+          echo "The file " ${Vpars0_filename} " does not exist"
+          exit
+       fi
+    fi
+done
+
+#--> copy of the file containing the electron temperature profile
+if [ "$read_Te0" == '.true.' ]; then
+    echo " => reading of the file " ${Te0_filename}
+    if [ -e ${Te0_filename} ]; then
+	cp ${Te0_filename} ${RESDIR}/Te0.dat
+    else
+	echo "The file " ${Te0_filename} " does not exist"
+	exit
+    fi
+fi
+
+#--> copy of the file containing the safety factor profile
+if [ "$read_q" == '.true.' ]; then
+    echo " => reading of the file " ${q_filename}
+    if [ -e ${q_filename} ]; then
+	cp ${q_filename}  ${RESDIR}/safety_factor.dat
+    else
+	echo "The file " ${q_filename} " does not exist"
+	exit
+    fi
+fi
+
+#--> copy of the file containing the ripple profile
+if [ "$TF_ripple" == '.true.' ]; then    
+    if [ -e ${ripple_filename} ]; then
+	echo " => reading of the file " ${ripple_filename}
+	cp ${ripple_filename}  ${RESDIR}/ripple.h5
+    else
+	echo -e "\e[31m The file '${ripple_filename}' does not exist\e[0m"
+	echo " You can use script 'ripple.py' to generate ripple HDF5 data file"
+	echo " Usage:  /usr/bin/env python3 ${WKDIR}/ripple.py $DATANAME ${ripple_filename}"
+	exit 1
+    fi
+fi
+
+#--> copy of the file containing the radial buffer profile
+if [ "$read_buffer_profile" == '.true.' ]; then
+    echo " => reading of the file " ${buffer_filename}
+    if [ -e ${buffer_filename} ]; then
+	cp ${buffer_filename}  ${RESDIR}/buffer_profile.dat
+    else
+	echo "The file " ${buffer_filename} " does not exist"
+	exit
+    fi
+fi
+
+#--> copy of the file containing the radial Pulse profile
+if [ ! -z "$read_pulse_profile" ]; then 
+    if [ "$read_pulse_profile" -eq 1 ] || [ "$read_pulse_profile" -eq 3 ] || [ "$read_pulse_profile" -eq 5 ] || [ "$read_pulse_profile" -eq 7 ]; then
+	echo " => reading of the file " ${pulse_filename_r}
+	if [ -e ${pulse_filename_r} ]; then
+	    cp ${pulse_filename_r}  ${RESDIR}/pulse_profile_r.dat
+	else
+	    echo "The file " ${pulse_filename_r} " does not exist"
+	    exit
+	fi
+    fi
+    if [ "$read_pulse_profile" -eq 2 ] || [ "$read_pulse_profile" -eq 3 ] || [ "$read_pulse_profile" -gt 6 ]; then
+	echo " => reading of the file " ${pulse_filename_th}
+	if [ -e ${pulse_filename_th} ]; then
+	    cp ${pulse_filename_th}  ${RESDIR}/pulse_profile_th.dat
+	else
+	    echo "The file " ${pulse_filename_th} " does not exist"
+	    exit
+	fi
+    fi
+    if [ "$read_pulse_profile" -gt 4 ]; then
+	echo " => reading of the file " ${pulse_filename_phi}
+	if [ -e ${pulse_filename_phi} ]; then
+	    cp ${pulse_filename_phi}  ${RESDIR}/pulse_profile_phi.dat
+	else
+	    echo "The file " ${pulse_filename_phi} " does not exist"
+	    exit
+	fi
+    fi
+fi
+
+STATEDIR=init_state
+SRCSDIR=sources
+CLDIR=conservation_laws
+RPROFDIR=rprof
+F2DDIR=f2D
+PHI2DDIR=Phi2D
+COLLISIONDIR=collisions
+PHI3DDIR=Phi3D
+FM3DDIR=moment3D
+FLUXES3DDIR=fluxes3D
+SPDIR=spectra
+F5DDIR=f5D
+POPEDIR=POPE
+MTM_TRACE=mtm_trace
+RST_FILES=rst_files
+
+mkdir -p ${RESDIR}/${MTM_TRACE}
+
+for DIR in ${STATEDIR} ${SRCSDIR} ${CLDIR} ${RPROFDIR} ${F2DDIR} \
+    ${PHI2DDIR} ${COLLISIONDIR} ${PHI3DDIR} ${FM3DDIR} ${FLUXES3DDIR} \
+    ${SPDIR} ${F5DDIR} ${POPEDIR}
+do
+    for ((i=0;i<=${NSPECIES}-1;i++)); do
+	if [ ! -d ${RESDIR}/sp$i/${DIR} ]; then
+	    mkdir -p ${RESDIR}/sp$i/${DIR}
+	fi
+    done
+done 
+for ((i=0;i<=${NSPECIES}-1;i++)); do
+    for ((imu=0;imu<=${NPROC_MU}-1;imu++)); do
+	imu_format=$(printf "%03d" $imu)
+	if [ ! -d ${RESDIR}/sp$i/${RST_FILES}/mu$imu_format ]; then
+	    mkdir -p ${RESDIR}/sp$i/${RST_FILES}/mu$imu_format
+        fi
+    done
+done
+
+# Init restart files 
+# --------------------------------
+echo " "
+SEARCH_SP0=`grep SEARCH_SP0 $DATANAME | head -n 1 | tr -s '=' ' ' |  awk '{print $2}'`
+if [ "${SEARCH_SP0}" = '' -o "${SEARCH_SP0}" = '0' ];then
+    echo " No restart from another simulation"
+    SEARCH_SP0=0
+else
+    DIR_SP0=`grep DIR_SP0 $DATANAME | head -n 1 | tr -s '=' ' ' |  awk '{print $2}'`
+    DIR_SP0_RST=$DIR_SP0'/sp0/rst_files'
+    if [ "$DIR_SP0_RST" == "" ]; then
+	printf "%s %0.f \t\t %s \n" " SEARCH_SP0 = " $SEARCH_SP0 " so you must specify a directory with restarts files !!"
+        exit
+    fi
+    # test if DIR_SP0_RST exist
+    echo " Restart with previous files from repository:" $DIR_SP0
+    if [ ! -d $DIR_SP0_RST ]; then
+	echo " Directory $DIR_SP0_RST doesn't exist !! "
+	exit
+    fi
+fi
+
+# Number of expected restart files
+CKPTMODE=`grep "^\s*checkpointing_strategy.*" $DATANAME | head -n 1 | tr -s '=' ' ' | tr -d '"' | awk '{print $2}' `
+if [ "$CKPTMODE" == "SION" ]; then
+    echo " checkpointing:  SION"
+    Nb_rst_exp=1
+    FIRST_RST_SUFF="sionlib"
+    ALL_RST_SUFF="sionlib"
+    EXTENSION_SUFF="sionlib"
+else
+    CKPTMODE="HDF5"
+    echo " checkpointing: HDF5"
+    ((Nb_rst_exp=NPROC_R*NPROC_TH*NPROC_MU))
+    FIRST_RST_SUFF="fn.p00000.h5"
+    ALL_RST_SUFF="fn.p*.h5"
+    EXTENSION_SUFF="h5"
+fi
+
+# Restart with previous simulation
+ALL_MU="mu*"
+if [ ${SEARCH_SP0} -ne '0' ]; then
+    # Restart with previous sp0 files
+    if [ -f ./check_nbrestart ]; then
+	echo "/usr/bin/env python3 ./check_nbrestart ${DIR_SP0} ${CKPTMODE} ${NB_RESTART} acronym"
+	TAB="`/usr/bin/env python3 ./check_nbrestart ${DIR_SP0} ${CKPTMODE} ${NB_RESTART} acronym`"
+    fi
+    rst_acronym=$(echo $TAB | cut -d' ' -f2)
+    echo "RST_acronym -${rst_acronym}-"
+    # Copy this restart file
+    for ((i=0;i<=${NSPECIES}-1;i++)); do
+	DIR_RST=$DIR_SP0/sp$i/rst_files/
+	if [ -e $DIR_RST ]; then
+            # Number of restart files in DIR_RST
+	    Nb_rst_DIR_RST=`ls $DIR_RST/mu*/gys_rst.sp$i.mu*.${rst_acronym}.${FIRST_RST_SUFF} | wc -l`
+            # Copy of this restart file
+	    for ((imu=0;imu<=${NPROC_MU}-1;imu++)); do
+		imu_format=$(printf "%03d" $imu)
+		rst_file='gys_rst.sp'$i'.mu'${imu_format}'.'${rst_acronym}'.'${ALL_RST_SUFF}
+		if [ -f ERR ]; then rm ERR; fi
+		echo "  => rsync restart files for sp$i "
+		rsync -avur ${DIR_RST}/mu$imu_format/${rst_file} $RESDIR/sp$i/rst_files/mu$imu_format/. 2>> ERR
+		status=$?;
+		if [ $status -ne 0 ]; then
+		    echo -e " \e[31m Problem with rsync command !!  so exit \e[0m"
+		    cat ERR
+		    rm ERR
+		    exit
+		fi
+	    done
+            # Number of restart files in result directory
+	    Nb_rst_count=`ls ${RESDIR}/sp$i/rst_files/mu*/gys_rst*${rst_acronym}.${FIRST_RST_SUFF} | wc -l`
+            # Compare this two numbers
+	    if [ $Nb_rst_count -eq $Nb_rst_DIR_RST ]; then
+		echo " ... rsync OK"; echo ""
+	    else
+                # RSYNC not OK ??
+		echo " \e[31m All the restart files doesn't exist !! \e[0m"
+		exit
+	    fi
+
+	    # Copy metadata file
+	    metadata="${DIR_RST}/metadata.${rst_acronym}.${EXTENSION_SUFF}"
+	    if [ -f ${metadata} ]; then
+		echo "${metadata} exist"
+
+		if [ -f ERR ]; then rm ERR; fi
+		echo "  => rsync ${metadata} file for sp$i"
+		rsync -avur ${metadata} $RESDIR/sp$i/rst_files/. 2>> ERR
+		status=$?;
+		if [ $status -ne 0 ]; then
+		    echo -e " \e[31m Problem with rsync command for metadata !! \e[0m"
+		    rm ERR
+		    exit
+		fi
+	    else
+		echo -e " \e[31m ! NO metadata file exist \e[0m"
+                # Test if restart files are in old format
+                # Test made also in create_rst_metadata.py
+		if [ -f ${DIR_RST}/gys_rst.sp$i.${rst_acronym}.${FIRST_RST_SUFF} ]; then
+		    if [ ${CKPTMODE} == "HDF5" ]; then
+			time_diag=`h5ls -d ${DIR_RST}/gys_rst.sp$i.${rst_acronym}.${FIRST_RST_SUFF}/time_diag`
+			time_diag=$(echo $time_diag | cut -d ' ' -f 6 | tr '\n' ' ')
+			if [ $time_diag != "" ]; then
+			    echo  " Restart files are in Old configuration, so executing script:"
+			    cmd="/usr/bin/env python3 ../post-process/Adapt_rst_files/create_rst_metadata.py ${RESDIR} ${i} ${rst_acronym}"
+			    echo -e "  \e[34m" $cmd "\e[0m"
+			    eval $cmd
+			    status=$?
+			    if [ $status -ne 0 ]; then
+				echo -e " \e[31m Problem with create_rst_metadata.py !! \e[0m"
+				rm ERR
+				exit
+			    fi
+			else
+			    echo -e " \e[31m Problem reading ${DIR_RST}/gys_rst.sp$i.${rst_acronym}.${FIRST_RST_SUFF} !! \e[0m"
+			fi
+		    else
+			echo -e " \e[31m Restart files are in Sionlib format, no metadata could be generated \e[0m"
+		    fi 
+		fi
+	    fi
+	fi
+    done
+else
+    if [ -e ${RESDIR}"/sp0/rst_files/mu000/gys_rst.sp0.mu000.n0.${FIRST_RST_SUFF}" ] || [ -e ${RESDIR}"/sp0/rst_files/mu000/gys_rst.sp0.mu000.n1.${FIRST_RST_SUFF}" ]; then
+	if [ -f ${WKDIR}/check_nbrestart ]; then
+	    TAB="`/usr/bin/env python3 ${WKDIR}/check_nbrestart ${RESDIR} ${CKPTMODE} ${NB_RESTART} acronym`"
+	fi
+	nb_restart=$(echo $TAB | cut -d' ' -f1)
+	rst_acronym=$(echo $TAB | cut -d' ' -f2)
+    else
+	nb_restart=-1
+	rst_acronym="n0"
+	echo " Initialisation ......................."
+    fi
+fi
+
+if [ -f ERR ]; then rm ERR; fi
+
+# Number of restart files in result directory
+if [ ! -f ${RESDIR}/sp0/rst_files/mu000/gys_rst.sp0.mu000.${rst_acronym}.${FIRST_RST_SUFF} ]; then
+    Nb_rst_count=0
+else
+    Nb_rst_count=`ls \${RESDIR}/sp0/rst_files/mu*/gys_rst.sp0.mu*.${rst_acronym}.${ALL_RST_SUFF} | wc -l`
+fi
+if [ $Nb_rst_exp -eq $Nb_rst_count ]; then
+    echo " Restart with files already in the directory"
+    echo ""
+fi
+
+# Test if a restart run is required
+if [ ${Nb_rst_count} -ne '0' ] && [ -f ./check_nbrestart ]; then
+    if ! /usr/bin/env python3 ./check_nbrestart ${RESDIR} ${CKPTMODE} ${NB_RESTART}; then exit 1; fi
+fi
+
+# Create autostop script
+# ----------------------
+touch ${RESDIR}/automatic_stop.sh
+chmod +x ${RESDIR}/automatic_stop.sh
+printf "sleep $TSLEEP\n"      > ${RESDIR}/automatic_stop.sh
+printf "$KILLCMD\n"          >> ${RESDIR}/automatic_stop.sh
+printf "touch gysela.stop\n" >> ${RESDIR}/automatic_stop.sh
+
+# Create script submission
+# ------------------------
+cp ${WKDIR}/${DATANAME} ${RESDIR}/input.${CASE}
+mv ${WKDIR}/data.${CASE} ${RESDIR}/DATA
+
+# copy pdi configuration script
+cp ${WKDIR}/pdiconfig.yml ${RESDIR}/pdiconfig.yml
+
+if [ ! -f ${RESDIR}/${exec_file} ]; then
+    if [ "${OPTIONALMODE}" = "DEBUG" ]; then    
+	if [ ! -f ${WKDIR}/gysela_dbg.exe ]; then
+	    echo " !! gysela not compiled in mode debug !! "
+	    exit
+	fi
+    fi
+    if [ "${OPTIONALMODE}" = "TIMER" ]; then    
+	if [ ! -f ${WKDIR}/gysela_ti.exe ]; then
+	    echo " !! gysela not compiled in mode timer !! "
+	    exit
+	fi
+    fi
+    if [ "${OPTIONALMODE}" = "SCOREP" ]; then    
+	if [ ! -f ${WKDIR}/gysela_scp.exe ]; then
+	    echo " !! gysela not compiled in mode SCORE-P !! "
+	    exit
+	fi
+    fi
+    cp ${WKDIR}/${exec_file} ${RESDIR}/${exec_file}
+fi
+cd ${WKDIR}
+
+cat <<EOF >> ${go_file_cmd}
+
+echo "list of loaded modules:"
+echo " =============================="
+module list || true
+echo " =============================="
+echo
+
+function halt_gys () {
+    if [ "$ARCH" == "ouessant" ]; then 
+        kill -s 9 0
+    else
+        kill -9 \$PID
+        rm -f auto.out auto.err autostop.pid mpistop.pid
+    fi
+    exit \$1
+}
+
+if [ -z "$WAITJOBEND" ]
+then
+set -vx
+fi
+cd ${RESDIR}
+
+# Script submission
+# -----------------
+if [ -e "sp0/rst_files/mu000/gys_rst.sp0.mu000.n0.${FIRST_RST_SUFF}" ] || [ -e "sp0/rst_files/mu000/gys_rst.sp0.mu000.n1.${FIRST_RST_SUFF}" ]; then
+    if [ -f ${WKDIR}/check_nbrestart ]; then
+       TAB="`/usr/bin/env python3 ${WKDIR}/check_nbrestart ${RESDIR} ${CKPTMODE} ${NB_RESTART} acronym`"
+    fi
+    nb_restart=\$(echo \$TAB | cut -d' ' -f1)
+    rst_acronym=\$(echo \$TAB | cut -d' ' -f2)
+else
+    nb_restart=-1
+    echo " Initialisation ......................."
+fi
+
+# Create script to stop gysela automatically
+# whenever the wall clock time limit is too low
+# ---------------------------------------------
+if [ -e gysela.stop ]; then
+    rm -f gysela.stop
+fi
+
+# test if nb_restart <= NB_RESTART
+# -----------------------------
+if [ "\$nb_restart" -le "$NB_RESTART" ]; then
+    echo " You want "$NB_RESTART" restart(s), and "\$nb_restart" are made "
+    ${RESDIR}/automatic_stop.sh 1>${RESDIR}/auto.out 2>${RESDIR}/auto.err &
+    PID=\$!
+    echo \$PID > ${RESDIR}/autostop.pid
+   
+    # run gysela.exe :
+    # ----------------
+    # Reset gysela_status file
+    echo "-1 : not started" >  gysela_status.txt
+   
+    export OMP_NUM_THREADS=${NTHREAD}
+    ${CMD_MPIRUN}
+    unset LD_PRELOAD
+    status=\$(head -n 1 gysela_status.txt| awk '{print \$1}')
+   
+    mv mtm_*.out ${MTM_TRACE}
+    for ((ns=0;ns<=${NSPECIES}-1;ns++)); do
+        mv sp\${ns}/init_state*.h5        sp\${ns}/${STATEDIR}
+        mv sp\${ns}/data_*.h5             sp\${ns}/${STATEDIR}
+        mv sp\${ns}/mesh5d_*.h5           sp\${ns}/${STATEDIR}
+        mv sp\${ns}/magnet_config_*.h5    sp\${ns}/${STATEDIR}
+        mv sp\${ns}/sources_*.h5          sp\${ns}/${SRCSDIR}
+        mv sp\${ns}/conservation_laws*.h5 sp\${ns}/${CLDIR}
+        mv sp\${ns}/rprof_*.h5            sp\${ns}/${RPROFDIR}
+        mv sp\${ns}/Phi2D*.h5             sp\${ns}/${PHI2DDIR}
+        mv sp\${ns}/Apar2D*.h5            sp\${ns}/${PHI2DDIR}
+        mv sp\${ns}/f2D*.h5               sp\${ns}/${F2DDIR}
+        mv sp\${ns}/collision*.h5         sp\${ns}/${COLLISIONDIR}
+        mv sp\${ns}/Phi_3D*.h5            sp\${ns}/${PHI3DDIR}
+        mv sp\${ns}/Phi_3D*.bin           sp\${ns}/${PHI3DDIR} 2>/dev/null
+        mv sp\${ns}/Apar_3D*.h5           sp\${ns}/${PHI3DDIR}
+        mv sp\${ns}/Apar_3D*.bin          sp\${ns}/${PHI3DDIR} 2>/dev/null
+        mv sp\${ns}/n*_GC_3D_*.h5         sp\${ns}/${FM3DDIR}
+        mv sp\${ns}/V_GC_3D_*.h5          sp\${ns}/${FM3DDIR}
+        mv sp\${ns}/Ppar_GC_3D_*.h5       sp\${ns}/${FM3DDIR}
+        mv sp\${ns}/Pperp*_GC_3D_*.h5     sp\${ns}/${FM3DDIR}
+        mv sp\${ns}/Gamma_*_3D*.h5        sp\${ns}/${FLUXES3DDIR}
+        mv sp\${ns}/Q*_3D*.h5             sp\${ns}/${FLUXES3DDIR}
+        mv sp\${ns}/spectra*.h5           sp\${ns}/${SPDIR}
+        mv sp\${ns}/f5D*.h5               sp\${ns}/${F5DDIR}
+        mv sp\${ns}/POPE*.h5              sp\${ns}/${POPEDIR}
+    done
+  
+    cd ${WKDIR}
+   
+    if [ "$NB_RESTART" -ne "0" ]; then
+        if [ "\$status" -eq ${STATUSOK} ]; then
+            # new submission
+            # --------------
+            if [ -f ./check_nbrestart ]; then
+                if ! /usr/bin/env python3 ./check_nbrestart ${RESDIR} ${CKPTMODE} ${NB_RESTART}
+                then
+                    halt_gys 1
+                fi
+            fi
+            ${CMD_SUBRST}
+        fi
+    fi
+fi
+halt_gys 0
+EOF
+
+# -----------------------------------------------------------------
+# Test presence of CMD_MPIRUN  
+# -----------------------------------------------------------------
+#command_mpirun=`echo $CMD_MPIRUN | awk '{print $1}'`
+#test_command_mpirun=`which $command_mpirun 2> /dev/null`
+#if [ ${#test_command_mpirun} -eq 0 ]; then
+#    echo " "
+#    echo "-----------------------------------------------------------------------"
+#    echo -e "\033[31m***ERROR: \033[0m $command_mpirun is not installed --> load GYSELA environment"
+#    echo "-----------------------------------------------------------------------"
+#    echo " "
+#    exit
+#fi
+
+# -----------------------------------------------------------------                                                                                                                          
+# Launch submission
+# -----------------------------------------------------------------
+chmod +x ${go_file_cmd}
+cd ${WKDIR}
+echo " ... ${CMD_SUB}"
+${CMD_SUB}
+if [ -n "$WAITJOBEND" ]; then
+    cat "${RESDIR}/gysela_log.out" "${RESDIR}/gysela_res.err"
+fi
